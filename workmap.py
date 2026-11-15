@@ -22,6 +22,17 @@ NEW_COMPRESSION = 'a'
 NEW_RETENTION = 'current_and_previous'
 
 
+def map_location(map_dir=None):
+    """Resolve one invocation; never change the module's legacy defaults."""
+    if map_dir is None:
+        return ROOT, DB
+    directory = Path(map_dir)
+    if not directory.is_absolute():
+        raise ValueError('--map-dirにはMapフォルダの絶対パスを指定してください。')
+    directory = directory.resolve()
+    return directory, directory / 'data/workmap.sqlite3'
+
+
 def initial_pin_review(state, request, args):
     from pma.workmap_pin_move import initial_pin_scope
     from pma.workmap_contract import _collection_status, rule_requires_disposition
@@ -48,8 +59,9 @@ def initial_pin_review(state, request, args):
             for n, rows in records.items()}
 
 
-def resume_request(path):
+def resume_request(path, *, map_dir=None):
     """Dispatch existing saved requests; never guess a new revision or request."""
+    map_root, db = map_location(map_dir)
     from pma.workmap_canonical_core import CanonicalWorkMapCore
     from pma.workmap_core import _digest
     from tools.apply_workmap_transition import _apply_request
@@ -57,30 +69,34 @@ def resume_request(path):
     bundle = json.loads(path.read_text(encoding='utf-8'))
     if bundle.get('kind') == 'owner-pin-workflow-v1':
         from tools.workmap_pin_workflow import owner_pin_workflow
-        return owner_pin_workflow(DB, backend='sqlite', reviewed_pin_move=True, reviewed_owner_pin=True, resume=path)
+        return owner_pin_workflow(db, backend='sqlite', reviewed_pin_move=True, reviewed_owner_pin=True, resume=path, evidence_repo=map_root)
+    if bundle.get('kind') == 'bound-workmap-transition-v1' or (bundle.get('changes') and bundle['changes'][0].get('op') == 'add_work'):
+        return add_work(db, backend='sqlite', resume=path, reviewed_owner_add=True, evidence_repo=map_root)
+    if bundle.get('evidence_repo', str(ROOT.resolve())) != str(map_root.resolve()):
+        raise ValueError('保存済み要求の根拠フォルダが一致していません。')
     if bundle.get('operation') == 'restore':
-        return restore_request(resume=path)
-    if bundle.get('store_binding') != {'path': str(DB.resolve()), 'backend': 'sqlite'}:
+        return restore_request(resume=path, map_dir=map_dir)
+    if bundle.get('store_binding') != {'path': str(db.resolve()), 'backend': 'sqlite'}:
         raise ValueError('保存済み要求はこのMapの保存先と一致していません。')
     q = bundle.get('request', {}); changes = q.get('changes', [])
     if not changes: raise ValueError('保存済み要求の種類を確認できません。')
     op = changes[-1].get('op')
     if op == 'add_work':
-        return add_work(DB, backend='sqlite', resume=path, reviewed_owner_add=True)
+        return add_work(db, backend='sqlite', resume=path, reviewed_owner_add=True, evidence_repo=map_root)
     if op == 'close':
         from tools.close_workmap_work import close_work
-        return close_work(DB, backend='sqlite', resume=path, reviewed_close=True)
+        return close_work(db, backend='sqlite', resume=path, reviewed_close=True, evidence_repo=map_root)
     if op == 'append_thread' and q.get('thread_entries', [{}])[0].get('kind') == 'evidence_recorded':
         from tools.record_workmap_evidence import record_evidence
-        return record_evidence(DB, backend='sqlite', resume=path)
+        return record_evidence(db, backend='sqlite', resume=path, evidence_repo=map_root)
     if len(changes) != 1 or op not in ('append_thread', 'set_permission', 'add_pin'):
         raise ValueError('この回収入口で扱わない要求です。元の正規入口で確認してください。')
     if bundle.get('request_digest') != _digest(q):
         raise ValueError('保存済み要求の内容が変わっています。元の要求を確認してください。')
-    state = SQLiteStore(DB).read().snapshot
+    state = SQLiteStore(db).read().snapshot
     if q.get('project_id') != state['project_id']:
         raise ValueError('保存済み要求は別projectです。')
-    observed = CanonicalWorkMapCore(SQLiteStore(DB)).lookup_transition(q['transition_id'])
+    observed = CanonicalWorkMapCore(SQLiteStore(db)).lookup_transition(q['transition_id'])
     if observed.get('status') == 'applied':
         if observed['receipt']['request_digest'] != _digest(q):
             raise ValueError('同じ要求IDの内容が一致しません。')
@@ -90,26 +106,28 @@ def resume_request(path):
     bindings = bundle.get('source_bindings')
     if not isinstance(bindings, dict) or set(bindings) != set(q['source_refs']):
         raise ValueError('この旧要求には根拠の版束縛がありません。現在と元の要求を個別に確認してください。')
-    if any(hashlib.sha256(repository_evidence(ref)).hexdigest() != digest for ref, digest in bindings.items()):
+    if any(hashlib.sha256(repository_evidence(ref) if map_dir is None else repository_evidence(ref, repo=map_root)).hexdigest() != digest for ref, digest in bindings.items()):
         raise ValueError('根拠が変わっています。元の要求の版を差し替えず、再判断してください。')
-    r = _apply_request(DB, q, backend='sqlite', evidence_repo=ROOT,
+    r = _apply_request(db, q, backend='sqlite', evidence_repo=map_root,
                        reviewed_owner_permission=op == 'set_permission',
                        context_assessments=bundle.get('assessments'))
-    found = CanonicalWorkMapCore(SQLiteStore(DB)).lookup_transition(q['transition_id'])
+    found = CanonicalWorkMapCore(SQLiteStore(db)).lookup_transition(q['transition_id'])
     return {'request_path': str(path), 'result': r,
             'readback': {'status': 'confirmed' if found.get('status') == 'applied' else 'unknown',
                          'scope': 'applied history', 'revision': found['observed_revision']}}
 
 
-def restore_request(args=None, *, resume=None):
+def restore_request(args=None, *, resume=None, map_dir=None):
     """Explicit local Owner recovery; no authority is granted to restored Works."""
+    map_root, db = map_location(map_dir)
     from pma.workmap_core import _digest
     if resume:
         path = Path(resume).resolve(); bundle = json.loads(path.read_text(encoding='utf-8'))
-        if (bundle.get('operation') != 'restore' or bundle.get('store_binding') != str(DB.resolve())):
+        if (bundle.get('operation') != 'restore' or bundle.get('store_binding') != str(db.resolve())
+                or bundle.get('evidence_repo', str(ROOT.resolve())) != str(map_root.resolve())):
             raise ValueError('復旧要求の保存先が一致しません。')
-        if DB.exists():
-            state = SQLiteStore(DB).read().snapshot
+        if db.exists():
+            state = SQLiteStore(db).read().snapshot
             if _digest(state) != bundle['restored_digest']:
                 raise ValueError('復旧先に別の状態があります。上書きせず現在値を確認してください。')
             return {'result': {'result': 'applied'}, 'readback': {'status': 'confirmed', 'revision': state['revision']}}
@@ -119,10 +137,10 @@ def restore_request(args=None, *, resume=None):
         retention = bundle['inputs'].get('retention', 'all')
     else:
         compression, retention = NEW_COMPRESSION, NEW_RETENTION
-        if DB.exists():
+        if db.exists():
             raise ValueError('現用DBは上書きしません。全アプリを閉じ、元DBとdocsを保全して退避してから復旧してください。')
-        source = owner_source(args.owner_instruction, OWNER, args.project_id)
-        path = DB.parent / 'transition-requests' / (uuid4().hex + '.restore.json')
+        source = owner_source(args.owner_instruction, OWNER, args.project_id, map_dir=map_dir)
+        path = db.parent / 'transition-requests' / (uuid4().hex + '.restore.json')
         path.parent.mkdir(parents=True, exist_ok=True)
     original, files, thread_status = prepare_restore(args.backup, args.candidate, args.sha256,
                 args.candidate_token, args.project_id, backend='sqlite')
@@ -134,42 +152,44 @@ def restore_request(args=None, *, resume=None):
         from copy import deepcopy
         state = deepcopy(original)
         state.update(revision=uuid4().hex, recorded_at=datetime.now(timezone.utc).isoformat())
-        bundle = {'operation': 'restore', 'store_binding': str(DB.resolve()),
-                  'actor': OWNER, 'recorded_at': state['recorded_at'], 'source_revision': original['revision'],
+        bundle = {'operation': 'restore', 'store_binding': str(db.resolve()),
+                  'evidence_repo': str(map_root.resolve()), 'actor': OWNER, 'recorded_at': state['recorded_at'], 'source_revision': original['revision'],
                   'inputs': {**{k: str(getattr(args,k)) for k in ('backup','candidate','sha256','candidate_token','project_id','owner_instruction')},
                              'compression': compression, 'retention': retention},
-                  'owner_source': source, 'owner_source_sha256': hashlib.sha256((ROOT/source[5:]).read_bytes()).hexdigest(),
+                  'owner_source': source, 'owner_source_sha256': hashlib.sha256((map_root/source[5:]).read_bytes()).hexdigest(),
                   'new_revision': state['revision'], 'restored_digest': _digest(state)}
         with path.open('x', encoding='utf-8') as stream:
             json.dump(bundle,stream,ensure_ascii=False,indent=2); stream.write('\n'); stream.flush()
             import os
             os.fsync(stream.fileno())
-    if hashlib.sha256((ROOT/bundle['owner_source'][5:]).read_bytes()).hexdigest() != bundle['owner_source_sha256']:
+    if hashlib.sha256((map_root/bundle['owner_source'][5:]).read_bytes()).hexdigest() != bundle['owner_source_sha256']:
         raise ValueError('復旧のOwner指示が変わっています。再判断してください。')
-    result = restore_verified(state, files, DB, ROOT, backend='sqlite',
+    result = restore_verified(state, files, db, map_root, backend='sqlite',
                               compression=compression, retention=retention)
     return {'request_path': str(path), 'result': {'result': 'applied', **result},
             'readback': {'status': 'confirmed', 'revision': state['revision'], 'thread_status': thread_status},
             'boundary': 'selected backup revision restored; external artifacts and later lost updates are not proved recovered'}
 
 
-def owner_source(text, actor, work):
+def owner_source(text, actor, work, *, map_dir=None):
+    map_root, db = map_location(map_dir)
     if not text or not text.strip():
         raise ValueError('実際のOwner指示を入力してください。')
-    folder = ROOT / 'docs/work-management/evidence'; folder.mkdir(parents=True, exist_ok=True)
+    folder = map_root / 'docs/work-management/evidence'; folder.mkdir(parents=True, exist_ok=True)
     file = folder / ('owner_personal_' + uuid4().hex + '.txt')
     file.write_text('ローカル操作者が確認したOwner指示。認証を証明するものではない。\n'
                     + '操作者: ' + actor + '\n対象: ' + work + '\n原文:\n' + text + '\n', encoding='utf-8')
-    return 'repo:' + file.relative_to(ROOT).as_posix()
+    return 'repo:' + file.relative_to(map_root).as_posix()
 
 
-def append_reason_or_permission(args):
+def append_reason_or_permission(args, *, map_dir=None):
+    map_root, db = map_location(map_dir)
     from tools.apply_workmap_transition import _apply_request
-    state = SQLiteStore(DB).read().snapshot
+    state = SQLiteStore(db).read().snapshot
     target = state['aliases'].get(args.work, args.work)
     if target not in state['map']['members']:
         raise ValueError('現在MapにあるWorkを指定してください。')
-    source = owner_source(args.owner_instruction, args.actor, target)
+    source = owner_source(args.owner_instruction, args.actor, target, map_dir=map_dir)
     tid = 'transition:' + str(uuid4()); grant = None; assessments = None
     entry = {'id': 'thread:' + tid, 'works': [target], 'kind': 'rationale_added',
              'summary': getattr(args, 'text', 'Ownerの明示的な操作許可'),
@@ -187,7 +207,7 @@ def append_reason_or_permission(args):
         if args.map_add:
             if operations: raise ValueError('--map-addは他の許可指定と分けてください。')
             operations = ['add_work_in_map']
-            constraints = ['map_project_id:' + state['project_id'], 'map_store_path:' + str(DB.resolve()),
+            constraints = ['map_project_id:' + state['project_id'], 'map_store_path:' + str(db.resolve()),
                            'このMapへのWork追加だけ。引受や他操作の許可は含めない。']
         if not operations: raise ValueError('--edit / --record / --close / --pin / --map-addを指定してください。')
         grant = {'id': 'permission:personal:' + uuid4().hex, 'targets': [target], 'grantee': args.actor,
@@ -211,21 +231,21 @@ def append_reason_or_permission(args):
                'changes': [change], 'thread_entries': [entry]}
     if args.command == 'pin':
         assessments = initial_pin_review(state, request, args)
-    folder = DB.parent / 'transition-requests'; folder.mkdir(exist_ok=True)
+    folder = db.parent / 'transition-requests'; folder.mkdir(exist_ok=True)
     path = folder / (tid.removeprefix('transition:') + '.json')
     with path.open('x', encoding='utf-8') as stream:
         from pma.workmap_core import _digest
-        json.dump({'store_binding': {'path': str(DB.resolve()), 'backend': 'sqlite'}, 'request': request,
+        json.dump({'store_binding': {'path': str(db.resolve()), 'backend': 'sqlite'}, 'request': request,
                    'request_digest': _digest(request),
-                   'source_bindings': {ref: hashlib.sha256((ROOT / ref[5:]).read_bytes()).hexdigest()
+                   'source_bindings': {ref: hashlib.sha256((map_root / ref[5:]).read_bytes()).hexdigest()
                                        for ref in request['source_refs']},
-                   'assessments': assessments}, stream, ensure_ascii=False, indent=2)
+                   'assessments': assessments, 'evidence_repo': str(map_root.resolve())}, stream, ensure_ascii=False, indent=2)
         stream.write('\n'); stream.flush()
         import os
         os.fsync(stream.fileno())
-    result = _apply_request(DB, request, backend='sqlite', reviewed_owner_permission=grant is not None,
-                            context_assessments=assessments, evidence_repo=ROOT)
-    after = SQLiteStore(DB).read().snapshot
+    result = _apply_request(db, request, backend='sqlite', reviewed_owner_permission=grant is not None,
+                            context_assessments=assessments, evidence_repo=map_root)
+    after = SQLiteStore(db).read().snapshot
     present = grant in after['map']['permissions'] if grant else any(
         e['id'] == entry['id'] and e['why'] == entry['why'] and e['works'] == [target]
         for e in after['thread_entries'])
@@ -234,19 +254,20 @@ def append_reason_or_permission(args):
             'readback': {'status': 'confirmed' if present else 'unavailable', 'revision': after['revision'], 'entry_id': entry['id']}}
 
 
-def gui(actor):
+def gui(actor, *, map_dir=None):
+    map_root, db = map_location(map_dir)
     import tkinter as tk
     from pma.workmap_viewer import WorkMapViewer
     root = tk.Tk()
-    app = WorkMapViewer(root, actor_names={actor: 'Owner'}, operator_id=actor,
-                       session_path=ROOT / 'data/viewer-session.json', background_reads=True, task_index_path=None)
-    preferred = None; own_unreadable = not DB.exists()
-    if DB.exists():
+    app = WorkMapViewer(root, actor_names={OWNER: 'Owner'}, operator_id=actor,
+                       session_path=map_root / 'data/viewer-session.json', background_reads=True, task_index_path=None)
+    preferred = None; own_unreadable = not db.exists()
+    if db.exists():
         from pma.workmap_store import StoreError
         try:
-            state = validate_snapshot(SQLiteStore(DB).read().snapshot)
+            state = validate_snapshot(SQLiteStore(db).read().snapshot)
             if state['metadata'].get('store_role') != 'canonical_current': raise ValueError('not canonical current')
-            preferred = (state['project_id'], DB.resolve())
+            preferred = (state['project_id'], db.resolve())
         except (OSError, ValueError, StoreError):
             own_unreadable = True
     if own_unreadable:
@@ -254,14 +275,16 @@ def gui(actor):
         app.session_error = 'このフォルダの正本が見つからないか、読めません。以前の接続一覧は保全し、自動接続しません。保存先と復旧手順を確認してください。'
         app.status.configure(text=app.session_error)
     if not own_unreadable: app.restore_session(preferred_source=preferred)
-    if DB.exists() and not any(s.path == DB.resolve() for s in app.sources): app.add_source(DB, ROOT)
+    if db.exists() and (map_dir is not None or not any(s.path == db.resolve() for s in app.sources)):
+        app.add_source(db, map_root)
     root.mainloop()
 
 
 def main(argv=None):
     if hasattr(sys.stdout, 'reconfigure'):
         sys.stdout.reconfigure(encoding='utf-8')
-    parser = argparse.ArgumentParser(description='個人用Work Map導入入口。保存先はこのフォルダのdata/workmap.sqlite3。')
+    parser = argparse.ArgumentParser(description='個人用Work Map。--map-dirでMapのフォルダを指定。省略時は従来どおり。')
+    parser.add_argument('--map-dir', type=Path, help='DBと根拠を置くMapフォルダの絶対パス')
     sub = parser.add_subparsers(dest='command', required=True)
     for name in ('init', 'add'):
         p = sub.add_parser(name)
@@ -306,50 +329,62 @@ def main(argv=None):
     p.add_argument('--reason', required=True); p.add_argument('--evidence', action='append', default=[])
     p.add_argument('--successor', action='append', default=[]); p.add_argument('--residual', action='append', default=[])
     p.add_argument('--release-own-pin', action='store_true')
+    for command_parser in sub.choices.values():
+        command_parser.add_argument('--map-dir', type=Path, default=argparse.SUPPRESS)
     args = parser.parse_args(argv)
     try:
+        map_dir = args.map_dir
+        map_root, db = map_location(map_dir)
         if args.command == 'gui':
-            gui(args.actor); return 0
+            gui(args.actor, map_dir=map_dir); return 0
         if args.command in ('init', 'add'):
             if args.command == 'init':
-                if DB.exists():
-                    current = SQLiteStore(DB).read().snapshot
+                if db.exists():
+                    current = SQLiteStore(db).read().snapshot
                     if not current['works'] and not current['receipts'] and current['metadata'].get('basis') == 'new_empty_personal_store':
                         raise ValueError('初期化途中の空DBです。元のdataとdocsを別名へ退避して保全し、新しい空フォルダでinitを行ってください。')
                     raise ValueError('初期化済みです。initの応答が不明なら保存済みの追加要求をresume-add --requestで確認してください。')
                 if not all(getattr(args, k).strip() for k in ('name', 'intent', 'origin', 'owner_instruction', 'actor')):
                     raise ValueError('Name / Intent / Origin / Owner指示 / actorは空にできません。')
-                DB.parent.mkdir(parents=True, exist_ok=True)
+                # The Pin workflow binds this exact operating document as evidence.
+                # Retain its version in the Map, not a copy of the program tree.
+                guide_rel = Path('docs/work-management/PIN_ROUTINE_ENTRY_2026-10-02.md')
+                guide = map_root / guide_rel
+                if not guide.exists():
+                    guide.parent.mkdir(parents=True, exist_ok=True)
+                    with guide.open('xb') as stream:
+                        stream.write((ROOT / guide_rel).read_bytes())
+                db.parent.mkdir(parents=True, exist_ok=True)
                 state = {'format_version': '0.4.2', 'project_id': 'project:' + str(uuid4()),
                     'revision': uuid4().hex, 'recorded_at': datetime.now(timezone.utc).isoformat(),
                     'works': {}, 'aliases': {}, 'display_ids': {}, 'display_id_history': [],
                     'map': {k: [] for k in ('members', 'relations', 'pins', 'permissions', 'action_rules', 'notes')},
                     'retirements': {}, 'thread_entries': [], 'receipts': {},
                     'metadata': {'completeness': 'full', 'store_role': 'canonical_current', 'basis': 'new_empty_personal_store'}}
-                SQLiteStore(DB).initialize(validate_snapshot(state),
+                SQLiteStore(db).initialize(validate_snapshot(state),
                                            compression=NEW_COMPRESSION, retention=NEW_RETENTION)
-            (ROOT / 'docs/work-management/evidence').mkdir(parents=True, exist_ok=True)
-            result = add_work(DB, backend='sqlite', actor=args.actor,
+            (map_root / 'docs/work-management/evidence').mkdir(parents=True, exist_ok=True)
+            result = add_work(db, backend='sqlite', actor=args.actor,
                 parent=getattr(args, 'parent', None), name=args.name, intent=args.intent, origin=args.origin,
                 owner_instruction=args.owner_instruction, reviewed_owner_add=True,
                 reason=getattr(args, 'reason', None), root=args.command == 'init',
-                display_id='W0' if args.command == 'init' else None)
+                display_id='W0' if args.command == 'init' else None, evidence_repo=map_root)
             print(json.dumps(result, ensure_ascii=False, indent=2))
             return 0 if result.get('readback', {}).get('status') == 'confirmed' else 2
         if args.command in ('show', 'thread', 'history'):
-            s = SQLiteStore(DB).read().snapshot
-            result = read_result(DB, args.work, tree=args.command == 'show' and not args.work,
+            s = SQLiteStore(db).read().snapshot
+            result = read_result(db, args.work, tree=args.command == 'show' and not args.work,
                 thread=args.command == 'thread', history=args.command == 'history',
                 brief=getattr(args, 'brief', False),
-                backend='sqlite', expected_project_id=s['project_id'], evidence_repo=ROOT)
+                backend='sqlite', expected_project_id=s['project_id'], evidence_repo=map_root)
             print(result['tree'] if 'tree' in result else json.dumps(result, ensure_ascii=False, indent=2))
             return 0 if result.get('status') == 'confirmed' else 2
         if args.command == 'resume-add':
-            result = add_work(DB, backend='sqlite', resume=args.request.resolve(), reviewed_owner_add=True)
+            result = add_work(db, backend='sqlite', resume=args.request.resolve(), reviewed_owner_add=True, evidence_repo=map_root)
             print(json.dumps(result, ensure_ascii=False, indent=2))
             return 0 if result.get('readback', {}).get('status') == 'confirmed' else 2
         if args.command == 'resume':
-            result = resume_request(args.request)
+            result = resume_request(args.request, map_dir=map_dir)
             print(json.dumps(result, ensure_ascii=False, indent=2))
             return 0 if result.get('readback', {}).get('status') == 'confirmed' else 2
         if args.command == 'recovery-show':
@@ -357,43 +392,43 @@ def main(argv=None):
             print(json.dumps(result, ensure_ascii=False, indent=2))
             return 0 if result['status'] == 'confirmed' else 2
         if args.command == 'restore':
-            result = restore_request(args)
+            result = restore_request(args, map_dir=map_dir)
             print(json.dumps(result, ensure_ascii=False, indent=2))
             return 0 if result.get('readback', {}).get('status') == 'confirmed' else 2
         if args.command in ('permit', 'reason'):
-            result = append_reason_or_permission(args)
+            result = append_reason_or_permission(args, map_dir=map_dir)
         elif args.command == 'result':
             from tools.record_workmap_evidence import record_evidence
-            result = record_evidence(DB, backend='sqlite', actor=args.actor, work=args.work, summary=args.text, sources=args.source)
+            result = record_evidence(db, backend='sqlite', actor=args.actor, work=args.work, summary=args.text, sources=args.source, evidence_repo=map_root)
         elif args.command == 'pin':
             from tools.workmap_pin_workflow import owner_pin_workflow
-            current = SQLiteStore(DB).read().snapshot
+            current = SQLiteStore(db).read().snapshot
             target = current['aliases'].get(args.work, args.work)
             own = [p for p in current['map']['pins'] if p['actor_id'] == args.actor]
             if not any(p['mode'] == 'active' or p['work_id'] == target for p in own):
-                result = append_reason_or_permission(args)
+                result = append_reason_or_permission(args, map_dir=map_dir)
                 print(json.dumps(result, ensure_ascii=False, indent=2))
                 return 0 if result['readback']['status'] == 'confirmed' else 2
-            draft = read_result(DB, backend='sqlite', pin_destination=args.work, actor=args.actor, pin_inputs=True,
-                                expected_project_id=SQLiteStore(DB).read().snapshot['project_id'], evidence_repo=ROOT)
+            draft = read_result(db, backend='sqlite', pin_destination=args.work, actor=args.actor, pin_inputs=True,
+                                expected_project_id=SQLiteStore(db).read().snapshot['project_id'], evidence_repo=map_root)
             if draft['status'] != 'confirmed' or 'inputs_draft' not in draft:
                 raise ValueError(draft.get('inputs_draft_error') or draft.get('reason') or 'Pin移動の現在前提を取得できません。')
             packet = draft['inputs_draft']; packet['inputs']['reason'] = args.reason
             for field in ('action_rule_basis', 'dependency_basis', 'scope_basis'):
                 if getattr(args, field): packet['inputs'][field] = getattr(args, field)
-            result = owner_pin_workflow(DB, backend='sqlite', reviewed_pin_move=True, reviewed_owner_pin=True,
-                                        owner_instruction=args.owner_instruction, inputs_packet=packet)
+            result = owner_pin_workflow(db, backend='sqlite', reviewed_pin_move=True, reviewed_owner_pin=True,
+                                        owner_instruction=args.owner_instruction, inputs_packet=packet, evidence_repo=map_root)
         elif args.command == 'close':
             from tools.close_workmap_work import close_work
-            source = owner_source(args.owner_instruction, args.actor, args.work)
-            result = close_work(DB, backend='sqlite', actor=args.actor, work=args.work, outcome=args.outcome,
+            source = owner_source(args.owner_instruction, args.actor, args.work, map_dir=map_dir)
+            result = close_work(db, backend='sqlite', actor=args.actor, work=args.work, outcome=args.outcome,
                                 reason=args.reason, sources=[source], evidence_refs=args.evidence,
                                 successors=args.successor, residuals=args.residual,
-                                release_own_pin=args.release_own_pin, reviewed_close=True)
+                                release_own_pin=args.release_own_pin, reviewed_close=True, evidence_repo=map_root)
         elif args.command == 'backup':
-            result = export_one(DB, args.output.resolve(), backend='sqlite', evidence_repo=ROOT)
+            result = export_one(db, args.output.resolve(), backend='sqlite', evidence_repo=map_root)
         else:
-            if args.target.resolve() == DB:
+            if args.target.resolve() == db:
                 raise ValueError('復旧確認先には現用DBを指定できません。')
             args.target.resolve().parent.mkdir(parents=True, exist_ok=True)
             result = recover_isolated(args.backup.resolve(), args.target.resolve(), args.sha256, backend='sqlite',
@@ -404,7 +439,7 @@ def main(argv=None):
         return 0 if result.get('management_recovery', 'verified') == 'verified' else 2
     except Exception as exc:
         print(json.dumps({'status': 'unknown_or_rejected', 'reason': str(exc),
-            'recovery': '失敗を未実行と決めつけず現在Mapを再読。保存済みのCLI要求がある場合だけ、init/addは resume-add --request <元要求>、その他の対応するCLI操作は resume --request <元要求> で照会する。GUI要求はこのCLIへ流用しない。未初期化ならinit、初期化途中なら元を保全して新しいフォルダで開始する。'}, ensure_ascii=False), file=sys.stderr)
+            'recovery': '失敗を未実行と決めつけず現在Mapを再読。保存済みのCLI要求がある場合だけ、init/addは resume-add --request <元要求>、その他の対応するCLI操作は resume --request <元要求> で照会する。GUI要求はこのCLIへ流用しない。既存MapはDB・根拠の保存先指定を確認する。initは新規Mapの作成を依頼されている場合だけ使う。初期化途中なら元を保全して新しいフォルダで開始する。'}, ensure_ascii=False), file=sys.stderr)
         return 2
 
 

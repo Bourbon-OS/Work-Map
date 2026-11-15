@@ -22,7 +22,7 @@ Work Mapは現在存在する目的を持つ対象と関係・現在地から次
 
 ## 構成
 
-公開版v0.3.0と、保存データの論理形式番号0.4.2は別のものです。利用者向けの案内では公開版を使い、保存形式を扱う実装・互換性の判断でだけ形式番号を使います。旧0.4.1形式のデータ移行は未確認です。
+公開版v0.4.0と、保存データの論理形式番号0.4.2は別のものです。利用者向けの案内では公開版を使い、保存形式を扱う実装・互換性の判断でだけ形式番号を使います。旧0.4.1形式のデータ移行は未確認です。
 
 | 場所 | 役割 |
 |---|---|
@@ -49,7 +49,7 @@ permitは既存set_permissionの薄い入口であり新しい権限モデルで
 
 編集者の既定IDは`actor:local-owner`。`--actor`だけを変更しても、そのIDに既存許可は移らない。CLIの`owner_source`は本人の実際の指示を文書として保存する機能で、本人認証や、AIが指示を捏造できないという保証ではない。
 
-接続一覧は配布フォルダの`data/viewer-session.json`へ保存する。開発環境やCodexの一覧は取得しない。フォルダの移動・複製では、同じprojectの旧保存先を自動接続せず、当該フォルダの正本を優先する。独立した別Mapの一覧を保持する。複製を二つの更新正本として並行利用しない。
+接続一覧は選んだMapフォルダの`data/viewer-session.json`へ保存する。`--map-dir`を明示した起動は、そのMapと根拠rootを最初の選択として優先し、他Mapの一覧も保持する。省略時は従来の配布フォルダと最後の選択を使う。プログラムの場所はimportの基準、MapフォルダはDB・根拠・保存要求の基準として分け、プロセス共通の保存先を切り替えない。開発環境やCodexの一覧は取得しない。フォルダの移動・複製では、同じprojectの旧保存先を自動接続せず、当該フォルダの正本を優先する。複製を二つの更新正本として並行利用しない。
 
 GUIのWork追加は現在、`docs`内の根拠ファイルを必須とする。CLIのaddは登録指示からその文書を作るため、人間の通常追加には入力負担の差がある。画面内の本人入力と反映確認から既存の根拠記録を作る案は、次の実装検討である。今回の文書修正で、この機能が実装済みになったとは扱わない。
 
@@ -61,14 +61,26 @@ CoreとStore adapterの境界は維持する。現在のSQLite採用を将来の
 
 通常の閲覧はUSAGEの画面とコマンドを使う。AIや独自連携が、先に得た索引と同じ版から本文一件を追加取得する時だけ、以下を使う。
 
-返答の`retrieve`や省略説明にある`--entry`、`--evidence`、`--expected-revision`は、`tools.read_workmap_store`用で、`workmap.py`の引数ではない。配布フォルダから実行する。
+返答の`retrieve`や省略説明にある`--entry`、`--evidence`、`--expected-revision`は、`tools.read_workmap_store`用で、`workmap.py`の引数ではない。初回に渡されたプログラム・Map・根拠の実値をそのまま使う。下は標準位置の例で、既存DBが別位置なら`$mapDb`をその絶対パスにする。
 
 ```powershell
-$env:PYTHONPATH = "$PWD;$PWD/src"
-python -X utf8 -m tools.read_workmap_store --backend sqlite --store "$PWD/data/workmap.sqlite3" --expected-project "実際のproject_id" --evidence-repo "$PWD" --work W1 --thread --entry "索引の理由ID" --expected-revision "briefのrevision"
+$wm = 'C:\WorkMapPersonal'
+$mapRoot = 'C:\Maps\Example' # docsの親
+$mapDb = 'C:\Maps\Example\data\workmap.sqlite3'
+$env:PYTHONPATH = "$wm\src;$wm"
+Set-Location -LiteralPath $wm
+python -X utf8 -m tools.read_workmap_store --backend sqlite --store $mapDb --expected-project "実際のproject_id" --evidence-repo $mapRoot --work W1 --thread --entry "索引の理由ID" --expected-revision "briefのrevision"
 ```
 
 `project_id`と`revision`はこのMapのshow／briefの返答から、IDはその索引から取る。開発projectのIDを流用しない。結果なら`--thread`を`--evidence`へ、IDを結果IDへ替える。版が違えば現在情報から読み直して再判断する。Pin出典など同じ版の詳細を読む時は`--thread --entry …`を外し、`--brief`を付けない。この取得でも許可・unknownの検査は維持する。
+
+追加・親変更の保存要求は、要求本体のID/digest・DB・根拠rootに加え、準備時のローカル根拠版を外枠へ保存する。未適用時は適用前とcommit直前に照合し、適用済みは元のreceiptを回収する。準備時の版がない旧未適用要求は、今のhashを足さず現在から判断し直す。回収には出力された絶対`request_path`を同じMap・元の入口へ渡す。DBの形式変更や全Mapの移行ではない。
+
+## 例外的な行動ルールの終了
+
+行動ルールの終了用Permissionの登録が、そのルール自身で止まる場合だけ、既存の`remove_action_rule`に対する限定Owner確認を使えます。対象一Workの旧ルール完全値、本人の実際の終了指示、解除条件を満たした根拠を揃え、`pma.workmap_owner_rule_end.bind_owner_rule_end_basis`で要求と根拠版を束縛してから、`tools.apply_workmap_transition --reviewed-owner-rule-end`へ渡します。帰属・解除条件・適用範囲の判断を済ませた担当が使う入口であり、自動解除や通常の許可の代用ではありません。
+
+根拠が変わった未適用要求を束縛し直して再送せず、元要求と結果を保って現在から判断します。旧値・根拠版・deny・unknown・他の行動ルール・競合・receiptの検査は維持します。成功後は通常履歴に旧ルールと終了根拠が残り、将来の判断に必要な新しい理由は別途通常Threadへ残します。日常操作の追加手順ではありません。
 
 ## 最初に伸ばす部分
 
@@ -95,7 +107,7 @@ python -X utf8 check.py
 
 合成試験の成功は、会社の実環境・長期運用・利用規程との適合の証明ではない。閉じる判断やOwnerの帰属確認は、hashやフラグだけでは自動証明できない。
 
-## v0.3.0の保存方針
+## 保存方針（v0.3.0以降）
 
 個人用入口の新規作成・新しい復旧候補・新しい復旧先は、既存の圧縮Aと現在/直前一版の有限保持を明示指定します。SQLiteの物理形式はapplication_idでcodecを区別し、この有限保持はuser_version=2です。Workの論理形式・必要なThread/receiptは変えません。ライブラリAPIの従来の既定値は互換のため維持し、既存DBを読むだけでは変換しません。
 

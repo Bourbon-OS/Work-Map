@@ -22,6 +22,7 @@ from pma.workmap_store import StoreError
 from pma.workmap_store_factory import open_store
 from tools.apply_workmap_transition import _apply_request
 from tools.move_workmap_pin import prepare_move, repository_evidence, _readback
+from pma.workmap_close import evidence_reader
 
 REPO = Path(__file__).resolve().parents[1]
 KIND = 'owner-pin-workflow-v1'
@@ -141,7 +142,7 @@ def _expected_after(snapshot, request):
 
 def owner_pin_workflow(store_path, *, backend, reviewed_pin_move=False,
                        reviewed_owner_pin=False, owner_instruction=None,
-                       owner_source=None, resume=None, inputs_packet=None, **meaning):
+                       owner_source=None, resume=None, inputs_packet=None, evidence_repo=None, **meaning):
     """One routine call: source -> narrow grants if needed -> move -> grant end.
 
     The Owner flag attests to an explicit Pin-change instruction, not to arbitrary
@@ -151,13 +152,18 @@ def owner_pin_workflow(store_path, *, backend, reviewed_pin_move=False,
     if not (reviewed_pin_move and reviewed_owner_pin):
         raise TransitionDenied('explicit Owner Pin attribution and current-scope operator review are both required')
     path = Path(store_path).resolve(); t0 = perf_counter()
+    repo = Path(evidence_repo) if evidence_repo is not None else REPO
+    if not repo.is_absolute(): raise ValueError("evidence root must be absolute")
+    repo = repo.resolve()
+    resolve_evidence = repository_evidence if evidence_repo is None else evidence_reader(repo)
     if resume is not None:
         if meaning or inputs_packet is not None or owner_instruction is not None or owner_source is not None:
             raise ValueError('resume cannot replace the saved instruction or meaning')
         checkpoint = Path(resume).resolve()
         b = json.loads(checkpoint.read_text(encoding='utf-8'))
         if (b.get('kind') != KIND or b.get('store_binding') != {'path': str(path), 'backend': backend}
-                or b.get('checkpoint_digest') != _digest({k: v for k, v in b.items() if k != 'checkpoint_digest'})):
+                or b.get('checkpoint_digest') != _digest({k: v for k, v in b.items() if k != 'checkpoint_digest'})
+                or b.get('evidence_repo', str(REPO.resolve())) != str(repo)):
             raise ValueError('resume requires the unchanged workflow and original Store/backend')
     else:
         if inputs_packet is not None and meaning:
@@ -167,16 +173,17 @@ def owner_pin_workflow(store_path, *, backend, reviewed_pin_move=False,
         snapshot = open_store(path, backend).read().snapshot
         if inputs_packet is not None:
             from tools.workmap_pin_inputs import resolve_pin_inputs
-            meaning = resolve_pin_inputs(inputs_packet, snapshot, path, backend)
+            meaning = resolve_pin_inputs(inputs_packet, snapshot, path, backend, evidence_repo=evidence_repo)
         # Capture the literal source; validate the complete plan before any Map mutation.
         owner_ref = owner_source
         if owner_ref is None:
-            owner_ref = capture_instruction(owner_instruction, meaning['actor'], meaning['destination'])
+            owner_ref = (capture_instruction(owner_instruction, meaning['actor'], meaning['destination'])
+                if evidence_repo is None else capture_instruction(owner_instruction, meaning['actor'], meaning['destination'], repo=repo))
         if not (owner_ref.startswith('repo:docs/work-management/evidence/owner_') and owner_ref.endswith('.txt')):
             raise ValueError('Owner evidence must be an existing repository Owner source')
-        repository_evidence(owner_ref)
+        resolve_evidence(owner_ref)
         meaning = {**meaning, 'sources': list(dict.fromkeys([*meaning.get('sources', []), owner_ref]))}
-        initial = prepare_move(snapshot, **meaning)
+        initial = prepare_move(snapshot, evidence_repo=evidence_repo, **meaning)
         if initial['assessments'] is not None:
             meaning.update(scope_basis=initial['assessments']['pins']['reason'])
         else:
@@ -187,7 +194,7 @@ def owner_pin_workflow(store_path, *, backend, reviewed_pin_move=False,
                 'all actor Pins at this revision; operator reviews grant constraints.')
         if inputs_packet is not None:
             from tools.workmap_pin_inputs import check_prepared_pin_inputs
-            check_prepared_pin_inputs(inputs_packet, snapshot, initial)
+            check_prepared_pin_inputs(inputs_packet, snapshot, initial, evidence_repo=evidence_repo)
         c = initial['request']['changes'][0]
         returning = c['op'] == 'update_pin'
         source = None if returning else c['target']
@@ -209,7 +216,7 @@ def owner_pin_workflow(store_path, *, backend, reviewed_pin_move=False,
              'workflow_id': wf, 'meaning': meaning, 'owner_source': owner_ref,
              'evidence_bindings': initial['source_bindings'], 'original_protected_digest': initial['protected_digest'],
              'frontier_digest': _digest(_projection(snapshot)), 'frontier_revision': snapshot['revision'],
-             'grants': grants, 'plan': [('grant', i) for i in range(len(grants))] + [('move', None)]
+             'evidence_repo': str(repo), 'grants': grants, 'plan': [('grant', i) for i in range(len(grants))] + [('move', None)]
                     + [('end', i) for i in reversed(range(len(grants)))],
              'steps': [], 'cursor': 0, 'move_bundle': None, 'display': initial['display']}
         directory = (path if backend == 'text' else path.parent) / 'transition-requests'
@@ -226,12 +233,12 @@ def owner_pin_workflow(store_path, *, backend, reviewed_pin_move=False,
             if not replay:
                 if current['revision'] != b['frontier_revision'] or _digest(_projection(current)) != b['frontier_digest']:
                     raise TransitionConflict('workflow premises changed; review current Map, do not rebase')
-                if any(hashlib.sha256(repository_evidence(r)).hexdigest() != h
+                if any(hashlib.sha256(resolve_evidence(r)).hexdigest() != h
                        for r, h in b['evidence_bindings'].items()):
                     raise TransitionConflict('workflow source evidence changed; review again')
             if step is None:
                 if kind == 'move':
-                    bundle = prepare_move(current, **b['meaning']); b['move_bundle'] = bundle
+                    bundle = prepare_move(current, evidence_repo=evidence_repo, **b['meaning']); b['move_bundle'] = bundle
                     q, assessments = bundle['request'], bundle['assessments']
                 else:
                     q, assessments = _permission_step(current, b['grants'][grant_index],
@@ -242,7 +249,7 @@ def owner_pin_workflow(store_path, *, backend, reviewed_pin_move=False,
                 b['steps'].append(step); _save(checkpoint, b)
             q = step['request']; t = perf_counter()
             result = _apply_request(path, q, backend=backend, context_assessments=step['assessments'],
-                reviewed_owner_permission=kind == 'grant', reviewed_pin_move=kind == 'move')
+                reviewed_owner_permission=kind == 'grant', reviewed_pin_move=kind == 'move', evidence_repo=evidence_repo)
             report['stage_timings'].append({'stage': kind, 'seconds': perf_counter() - t, 'receipt_replay': replay})
             if result.get('result') != 'applied':
                 raise TransitionError('workflow stage did not return an applied receipt')

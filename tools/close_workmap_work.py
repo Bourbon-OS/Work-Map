@@ -15,7 +15,7 @@ from time import perf_counter
 from uuid import uuid4
 
 from pma.workmap_canonical_core import CanonicalWorkMapCore
-from pma.workmap_close import bind_close_basis, close_precondition, repository_evidence
+from pma.workmap_close import bind_close_basis, close_precondition, repository_evidence, evidence_reader
 from pma.workmap_contract import ContextUnknown, SnapshotInvalid, validate_snapshot
 from pma.workmap_core import TransitionConflict, TransitionDenied, TransitionError, UnsupportedTransition, _digest
 from pma.workmap_resume import close_history
@@ -110,7 +110,7 @@ def _readback(store_path, backend, request):
 
 def close_work(store_path, *, backend, actor=None, work=None, outcome=None, reason=None,
                sources=(), evidence_refs=(), result=None, revisit=None, successors=(),
-               residuals=(), release_own_pin=False, reviewed_close=False, resume=None):
+               residuals=(), release_own_pin=False, reviewed_close=False, resume=None, evidence_repo=None):
     """Assemble a reviewed one-Work close; replay never rebases an old decision."""
     started = perf_counter()
     store_path = Path(store_path).resolve()
@@ -121,8 +121,9 @@ def close_work(store_path, *, backend, actor=None, work=None, outcome=None, reas
             raise ValueError('resume uses the saved request, without replacement decisions')
         request_path = Path(resume).resolve()
         bundle = json.loads(request_path.read_text(encoding='utf-8'))
-        if (not isinstance(bundle, dict) or set(bundle) != {'store_binding', 'request'}
-                or bundle['store_binding'] != binding):
+        if (not isinstance(bundle, dict) or not {'store_binding', 'request'} <= set(bundle) or set(bundle) - {'store_binding', 'request', 'evidence_repo'}
+                or bundle['store_binding'] != binding
+                or bundle.get('evidence_repo', str(Path(__file__).resolve().parents[1])) != str(Path(evidence_repo or Path(__file__).resolve().parents[1]).resolve())):
             raise ValueError('saved close belongs to a different Store or backend')
         request = bundle['request']
         _check_request(request)
@@ -178,19 +179,19 @@ def close_work(store_path, *, backend, actor=None, work=None, outcome=None, reas
                    'transition_id': tid, 'actor_id': actor, 'base_revision': state['revision'],
                    'intent': 'Close the specified reviewed Work, without choosing residual disposition',
                    'source_refs': refs, 'preconditions': [], 'changes': changes, 'thread_entries': [entry]}
-        request = bind_close_basis(state, request, resolver=repository_evidence)
+        request = bind_close_basis(state, request, resolver=repository_evidence if evidence_repo is None else evidence_reader(evidence_repo))
         _check_request(request)
         directory = (store_path if backend == 'text' else store_path.parent) / 'transition-requests'
         directory.mkdir(exist_ok=True)
         request_path = directory / (tid.removeprefix('transition:') + '.close.json')
         with request_path.open('x', encoding='utf-8') as stream:
-            json.dump({'store_binding': binding, 'request': request}, stream, ensure_ascii=False, indent=2)
+            json.dump({'store_binding': binding, 'request': request, **({'evidence_repo': str(Path(evidence_repo).resolve())} if evidence_repo is not None else {})}, stream, ensure_ascii=False, indent=2)
             stream.write('\n'); stream.flush(); os.fsync(stream.fileno())
 
     report = {'request_path': str(request_path), 'transition_id': request['transition_id'],
               'work_key': request['changes'][-1]['target']}
     try:
-        report['result'] = _apply_request(store_path, request, backend=backend, reviewed_close=reviewed_close)
+        report['result'] = _apply_request(store_path, request, backend=backend, reviewed_close=reviewed_close, evidence_repo=evidence_repo)
     except (ContextUnknown, TransitionDenied, TransitionConflict, UnsupportedTransition, TransitionError) as exc:
         report['result'] = {'result': 'rejected', 'category': type(exc).__name__, 'reason': str(exc)}
     except (OSError, StoreError, SnapshotInvalid):
@@ -217,6 +218,7 @@ def main():
     parser.add_argument('--release-own-pin', action='store_true', help='Explicitly end only your own involvement in this Work')
     parser.add_argument('--reviewed-close', action='store_true', help='Operator reviewed this close meaning and scope; grants no authority')
     parser.add_argument('--resume', type=Path)
+    parser.add_argument('--evidence-repo', type=Path)
     args = parser.parse_args()
     if not args.store.is_absolute():
         parser.error('Store path must be absolute')
@@ -226,7 +228,7 @@ def main():
                             evidence_refs=args.evidence, result=args.result, revisit=args.revisit,
                             successors=args.successor, residuals=args.residual,
                             release_own_pin=args.release_own_pin, reviewed_close=args.reviewed_close,
-                            resume=args.resume)
+                            resume=args.resume, evidence_repo=args.evidence_repo)
     except (OSError, StoreError, SnapshotInvalid) as exc:
         report = {'result': {'result': 'unknown', 'reason': str(exc)}}
     except (ValueError, TypeError, ContextUnknown, TransitionError) as exc:

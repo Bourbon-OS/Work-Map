@@ -17,7 +17,7 @@ from pathlib import Path
 from time import perf_counter
 from uuid import uuid4
 
-from pma.workmap_close import repository_evidence
+from pma.workmap_close import repository_evidence, evidence_reader
 from pma.workmap_contract import ContextUnknown, SnapshotInvalid, rule_requires_disposition, validate_snapshot
 from pma.workmap_core import TransitionConflict, TransitionDenied, TransitionError, _digest
 from pma.workmap_pin_move import routine_pin_guard, pin_move_scope, move_note_id, is_held_reactivation
@@ -42,7 +42,7 @@ def _protected(snapshot, actor, source, destination, note_id, request=None):
 
 def prepare_move(snapshot, *, actor, destination, reason, sources, remaining=None, first_step=None,
                  unsaved=None, acceptance_basis=None, action_rule_basis=None,
-                 dependency_basis=None, scope_basis=None, reusable_refs=(), where=None):
+                 dependency_basis=None, scope_basis=None, reusable_refs=(), where=None, evidence_repo=None):
     """Build exact rows/IDs mechanically. Basis statements must be real reviews."""
     snapshot = validate_snapshot(snapshot)
     if snapshot['metadata'].get('store_role') != 'canonical_current':
@@ -151,7 +151,7 @@ def prepare_move(snapshot, *, actor, destination, reason, sources, remaining=Non
         assessments = None
     return {'request': request, 'assessments': assessments, 'request_digest': _digest(request),
             'protected_digest': _protected(snapshot, actor, source, destination, note_id, request),
-            'source_bindings': {r: hashlib.sha256(repository_evidence(r)).hexdigest() for r in refs},
+            'source_bindings': {r: hashlib.sha256((repository_evidence if evidence_repo is None else evidence_reader(evidence_repo))(r)).hexdigest() for r in refs},
             'display': {'from': snapshot['display_ids'][source] if source else None, 'to': snapshot['display_ids'][destination]},
             'scope_counts': {n: len(rows) for n, rows in records.items()}}
 
@@ -180,7 +180,7 @@ def _readback(snapshot, bundle):
             'revision': snapshot['revision'], **bundle['display']}
 
 
-def move_pin(store_path, *, backend, reviewed_pin_move=False, resume=None, inputs_packet=None, **meaning):
+def move_pin(store_path, *, backend, reviewed_pin_move=False, resume=None, inputs_packet=None, evidence_repo=None, **meaning):
     started = datetime.now(timezone.utc).isoformat(); t0 = perf_counter(); timings = {}
     path = Path(store_path).resolve()
     if resume is not None:
@@ -189,6 +189,7 @@ def move_pin(store_path, *, backend, reviewed_pin_move=False, resume=None, input
         bundle_path = Path(resume).resolve()
         bundle = json.loads(bundle_path.read_text(encoding='utf-8'))
         if (bundle.get('store_binding') != {'path': str(path), 'backend': backend}
+                or bundle.get('evidence_repo', str(Path(__file__).resolve().parents[1])) != str(Path(evidence_repo or Path(__file__).resolve().parents[1]).resolve())
                 or bundle.get('request_digest') != _digest(bundle['request'])
                 or len(bundle['request']['changes']) != 1
                 or not (bundle['request']['changes'][0]['op'] == 'move_active_pin'
@@ -203,12 +204,13 @@ def move_pin(store_path, *, backend, reviewed_pin_move=False, resume=None, input
         t = perf_counter()
         if inputs_packet is not None:
             from tools.workmap_pin_inputs import resolve_pin_inputs
-            meaning = resolve_pin_inputs(inputs_packet, snapshot, path, backend)
-        bundle = prepare_move(snapshot, **meaning)
+            meaning = resolve_pin_inputs(inputs_packet, snapshot, path, backend, evidence_repo=evidence_repo)
+        bundle = prepare_move(snapshot, evidence_repo=evidence_repo, **meaning)
         if inputs_packet is not None:
             from tools.workmap_pin_inputs import check_prepared_pin_inputs
-            check_prepared_pin_inputs(inputs_packet, snapshot, bundle)
+            check_prepared_pin_inputs(inputs_packet, snapshot, bundle, evidence_repo=evidence_repo)
         bundle['store_binding'] = {'path': str(path), 'backend': backend}
+        if evidence_repo is not None: bundle['evidence_repo'] = str(Path(evidence_repo).resolve())
         directory = (path if backend == 'text' else path.parent) / 'transition-requests'
         directory.mkdir(exist_ok=True)
         bundle_path = directory / (bundle['request']['transition_id'][11:] + '.pin-move.json')
@@ -232,13 +234,13 @@ def move_pin(store_path, *, backend, reviewed_pin_move=False, resume=None, input
             if q['transition_id'] not in current['receipts']:
                 if current['revision'] != q['base_revision'] and not requests_reapplication(q):
                     raise TransitionConflict('prepared revision changed; review current Map again')
-                if any(hashlib.sha256(repository_evidence(r)).hexdigest() != h
+                if any(hashlib.sha256((repository_evidence if evidence_repo is None else evidence_reader(evidence_repo))(r)).hexdigest() != h
                        for r, h in bundle['source_bindings'].items()):
                     raise TransitionConflict('prepared source evidence changed; review again')
                 if requests_reapplication(q):
                     check_reapplication(store, current, q)
             report['result'] = _apply_request(path, q, backend=backend,
-                reviewed_pin_move=True, context_assessments=bundle['assessments'])
+                reviewed_pin_move=True, context_assessments=bundle['assessments'], evidence_repo=evidence_repo)
         except (OSError, StoreError, SnapshotInvalid) as exc:
             report['result'] = {'result': 'unknown', 'reason': str(exc),
                                 'recovery': 'Resume the same saved bundle; do not rebuild the request'}
@@ -271,6 +273,7 @@ def main():
     p.add_argument('--reviewed-pin-move', action='store_true',
                    help='Operator reviewed own acceptance, grant constraints, Action Rules, dependencies and current scope; not a grant')
     p.add_argument('--resume', type=Path)
+    p.add_argument('--evidence-repo', type=Path)
     p.add_argument('--inputs-json', help='Filled input draft from the reader; never a review or grant')
     owner = p.add_mutually_exclusive_group()
     owner.add_argument('--owner-instruction', help='Literal direct Owner Pin-change instruction, not quoted approval')
@@ -297,10 +300,10 @@ def main():
             report = owner_pin_workflow(a.store, backend=a.backend,
                 reviewed_pin_move=a.reviewed_pin_move, reviewed_owner_pin=a.reviewed_owner_pin,
                 owner_instruction=a.owner_instruction, owner_source=a.owner_source,
-                resume=a.resume, inputs_packet=packet, **supplied)
+                resume=a.resume, inputs_packet=packet, evidence_repo=a.evidence_repo, **supplied)
         else:
             report = move_pin(a.store, backend=a.backend, reviewed_pin_move=a.reviewed_pin_move,
-                              resume=a.resume, inputs_packet=packet, **supplied)
+                              resume=a.resume, inputs_packet=packet, evidence_repo=a.evidence_repo, **supplied)
     except (OSError, ValueError, KeyError, TypeError, StoreError, SnapshotInvalid, TransitionError) as exc:
         p.exit(2, str(exc) + '\n')
     print(json.dumps(report, ensure_ascii=False))
