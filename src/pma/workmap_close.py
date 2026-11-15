@@ -19,10 +19,13 @@ class ReviewedClose:
     request_digest: str
 
 
-def repository_evidence(ref: str) -> bytes:
+def repository_evidence(ref: str, *, repo=None) -> bytes:
     relative = ref.removeprefix('repo:')
     parts = PurePosixPath(relative).parts
-    root = Path(__file__).resolve().parents[2]
+    root = Path(repo) if repo is not None else Path(__file__).resolve().parents[2]
+    if not root.is_absolute():
+        raise TransitionDenied('evidence root must be absolute')
+    root = root.resolve()
     if (not ref.startswith('repo:') or not parts or parts[0] not in ('docs', 'skills')
             or any(p in ('..', '.') or ':' in p or '\\' in p for p in parts)
             or '#' in relative):
@@ -31,6 +34,11 @@ def repository_evidence(ref: str) -> bytes:
     if not path.is_relative_to(root / parts[0]):
         raise TransitionDenied('close evidence escapes the repository boundary')
     return path.read_bytes()
+
+
+def evidence_reader(repo=None):
+    """Select the Map's document root without changing process-global defaults."""
+    return repository_evidence if repo is None else lambda ref: repository_evidence(ref, repo=repo)
 
 
 def _entry(request):

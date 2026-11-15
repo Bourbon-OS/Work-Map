@@ -397,7 +397,7 @@ def read_result(directory: Path, display_id: str | None = None, *, tree: bool = 
                 from tools.workmap_pin_inputs import pin_inputs_draft
                 try:
                     result['inputs_draft'] = pin_inputs_draft(snapshot, directory, backend,
-                        actor=actor, destination=pin_destination, where=destination_where)
+                        actor=actor, destination=pin_destination, where=destination_where, evidence_repo=evidence_repo)
                 except (OSError, ValueError, TransitionError) as exc:
                     # Keep the recorded context visible, even if a bound draft is unavailable.
                     result['inputs_draft_error'] = str(exc)

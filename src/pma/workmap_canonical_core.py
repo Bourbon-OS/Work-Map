@@ -16,6 +16,7 @@ from pma.workmap_contract import ContextUnknown, inspect_work, require_decision_
 from pma.workmap_birth_confirmation import apply_birth_confirmation
 from pma.workmap_collection_confirmation import (apply_current_collections, confirmation_detail)
 from pma.workmap_owner_permission import validate_owner_permission, verify_permission_sources
+from pma.workmap_owner_rule_end import validate_owner_rule_end, verify_rule_end_sources
 from pma.workmap_owner_scope import ReviewedOwnerScope, apply_owner_scope, limited_review_context
 from pma.workmap_pin_move import ReviewedPinMove, apply_pin_move
 from pma.workmap_owner_add import ReviewedOwnerAdd, validate_owner_add, verify_owner_add_sources, is_root_add
@@ -539,6 +540,7 @@ class CanonicalWorkMapCore(WorkMapCore):
                  reviewed_pin_move: ReviewedPinMove | None = None,
                  reviewed_owner_add: ReviewedOwnerAdd | None = None,
                  reviewed_owner_permission=None,
+                 reviewed_owner_rule_end=None,
                  reviewed_birth_confirmation=None,
                  reviewed_current_collections=None,
                  reviewed_decision_context=None,
@@ -554,6 +556,7 @@ class CanonicalWorkMapCore(WorkMapCore):
         self.reviewed_pin_move = reviewed_pin_move
         self.reviewed_owner_add = reviewed_owner_add
         self.reviewed_owner_permission = reviewed_owner_permission
+        self.reviewed_owner_rule_end = reviewed_owner_rule_end
         self.reviewed_birth_confirmation = reviewed_birth_confirmation
         self.reviewed_current_collections = reviewed_current_collections
         self.reviewed_close = reviewed_close
@@ -576,6 +579,8 @@ class CanonicalWorkMapCore(WorkMapCore):
             verify_permission_sources(self.reviewed_current_collections)
         if self.reviewed_owner_permission is not None:
             verify_permission_sources(self.reviewed_owner_permission)
+        if self.reviewed_owner_rule_end is not None:
+            verify_rule_end_sources(self.reviewed_owner_rule_end)
         if self.reviewed_owner_add is not None:
             verify_owner_add_sources(self.reviewed_owner_add)
         if any(c.get('op') == 'close' for c in transition['changes']):
@@ -904,6 +909,8 @@ class CanonicalWorkMapCore(WorkMapCore):
                                    store_path=getattr(self.store, 'path', getattr(self.store, 'directory', None)))
             elif operation == 'set_permission' and self.reviewed_owner_permission is not None:
                 entry = {**entry, "consequence": validate_owner_permission(snapshot, transition, self.reviewed_owner_permission, self.reviewed_decision_context)}
+            elif operation == 'remove_action_rule' and self.reviewed_owner_rule_end is not None:
+                entry = {**entry, "consequence": validate_owner_rule_end(snapshot, transition, self.reviewed_owner_rule_end, self.reviewed_decision_context)}
             else:
                 from pma.workmap_decision_context import require_operation_context
                 require_operation_context(snapshot, transition, self.reviewed_decision_context,

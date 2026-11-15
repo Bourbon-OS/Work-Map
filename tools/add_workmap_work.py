@@ -17,7 +17,7 @@ from pma.workmap_contract import validate_snapshot
 from pma.workmap_contract import SnapshotInvalid
 from pma.workmap_store import StoreError
 from pma.workmap_store_factory import open_store
-from tools.apply_workmap_transition import apply_result
+from tools.apply_workmap_transition import apply_result, bind_request, load_request
 from tools.read_workmap_store import read_result
 
 REPO = Path(__file__).resolve().parents[1]
@@ -25,10 +25,13 @@ REPO = Path(__file__).resolve().parents[1]
 
 def add_work(store_path, *, backend, actor=None, parent=None, name=None, intent=None,
              origin=None, sources=(), reason=None, reviewed_owner_add=False,
-             owner_instruction=None, resume=None, root=False, display_id=None):
+             owner_instruction=None, resume=None, root=False, display_id=None, evidence_repo=None):
     started = datetime.now(timezone.utc).isoformat()
     t0 = perf_counter()
     store_path = Path(store_path).resolve()
+    repo = Path(evidence_repo) if evidence_repo is not None else REPO
+    if not repo.is_absolute(): raise ValueError("evidence root must be absolute")
+    repo = repo.resolve()
     timings = {}
     if resume is None:
         if not all(isinstance(v, str) and v.strip() for v in (actor, name, intent, origin)):
@@ -52,12 +55,13 @@ def add_work(store_path, *, backend, actor=None, parent=None, name=None, intent=
         refs = list(dict.fromkeys(sources))
         if owner_instruction:
             raw = ('Operator-attributed Owner instruction for this registration:\n\n' + owner_instruction + '\n').encode('utf-8')
-            evidence = REPO/'docs/work-management/evidence'/('owner_add_' + hashlib.sha256(raw).hexdigest() + '.txt')
+            evidence = repo/'docs/work-management/evidence'/('owner_add_' + hashlib.sha256(raw).hexdigest() + '.txt')
+            evidence.parent.mkdir(parents=True, exist_ok=True)
             try:
                 with evidence.open('xb') as f: f.write(raw)
             except FileExistsError:
                 if evidence.read_bytes() != raw: raise ValueError('Owner evidence path contains different bytes')
-            refs.append('repo:' + evidence.relative_to(REPO).as_posix())
+            refs.append('repo:' + evidence.relative_to(repo).as_posix())
         request = build_add_request(current, actor=actor, parent=parent_key, name=name,
             intent=intent, origin=origin, refs=refs, reason=reason, root=root,
             display_id=display_id, recorded_at=started)
@@ -67,8 +71,9 @@ def add_work(store_path, *, backend, actor=None, parent=None, name=None, intent=
         directory = (store_path if backend == 'text' else store_path.parent)/'transition-requests'
         directory.mkdir(exist_ok=True)
         request_path = directory/(tid.removeprefix('transition:') + '.json')
+        saved = bind_request(request, store_path, backend, repo)
         with request_path.open('x', encoding='utf-8') as f:
-            json.dump(request, f, ensure_ascii=False, indent=2)
+            json.dump(saved, f, ensure_ascii=False, indent=2)
             f.write('\n')
             f.flush()
             os.fsync(f.fileno())
@@ -77,11 +82,11 @@ def add_work(store_path, *, backend, actor=None, parent=None, name=None, intent=
         if root or display_id is not None or any(v is not None for v in (actor, parent, name, intent, origin, reason, owner_instruction)) or sources:
             raise ValueError('resume accepts the saved request, not replacement meaning fields')
         request_path = Path(resume).resolve()
-        request = json.loads(request_path.read_text(encoding='utf-8'))
+        request = load_request(store_path, request_path, backend, evidence_repo)
         if len(request.get('changes', [])) != 1 or request['changes'][0].get('op') != 'add_work':
             raise ValueError('resume requires one saved add_work request')
     apply_started = perf_counter()
-    result = apply_result(store_path, request_path, backend=backend, reviewed_owner_add=reviewed_owner_add)
+    result = apply_result(store_path, request_path, backend=backend, reviewed_owner_add=reviewed_owner_add, evidence_repo=evidence_repo)
     timings['apply_seconds'] = perf_counter() - apply_started
     report = {'result': result, 'request_path': str(request_path), 'started_at': started,
               'timings': timings}
@@ -104,7 +109,7 @@ def add_work(store_path, *, backend, actor=None, parent=None, name=None, intent=
                 and key in snapshot['map']['members'] and snapshot['works'].get(key) == work
                 and snapshot['display_ids'].get(key) == display
                 and same_parent)
-        view = read_result(store_path, display, thread=True, backend=backend)
+        view = read_result(store_path, display, thread=True, backend=backend, evidence_repo=evidence_repo)
         same = same and view.get('revision') == snapshot['revision'] and view.get('status') == 'confirmed'
         records = [e for e in snapshot['thread_entries'] if e.get('transition_id') == request['transition_id']]
         report['readback'] = {'status': 'confirmed' if same else 'changed_or_unavailable',
@@ -126,6 +131,7 @@ def main():
     p.add_argument('--source', action='append', default=[])
     p.add_argument('--reviewed-owner-add', action='store_true')
     p.add_argument('--resume', type=Path)
+    p.add_argument('--evidence-repo', type=Path)
     p.add_argument('--root', action='store_true', help='explicit Parent-free Owner registration')
     p.add_argument('--display-id', help='explicit unused root address; only with --root')
     a = p.parse_args()
@@ -134,7 +140,8 @@ def main():
         report = add_work(a.store, backend=a.backend, actor=a.actor, parent=a.parent,
                           name=a.name, intent=a.intent, origin=a.origin, sources=a.source,
                           reason=a.reason, reviewed_owner_add=a.reviewed_owner_add,
-                          owner_instruction=a.owner_instruction, resume=a.resume, root=a.root, display_id=a.display_id)
+                          owner_instruction=a.owner_instruction, resume=a.resume, root=a.root, display_id=a.display_id,
+                          evidence_repo=a.evidence_repo)
     except (OSError, ValueError, KeyError, TypeError, StoreError, SnapshotInvalid) as exc:
         p.exit(2, str(exc) + '\n')
     print(json.dumps(report, ensure_ascii=False))

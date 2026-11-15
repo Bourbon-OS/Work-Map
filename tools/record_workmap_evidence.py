@@ -78,7 +78,7 @@ def _readback(store_path, backend, request):
 
 
 def record_evidence(store_path, *, backend, actor=None, work=None, summary=None,
-                    sources=(), why=None, occurred_at=None, related_entries=(), resume=None):
+                    sources=(), why=None, occurred_at=None, related_entries=(), resume=None, evidence_repo=None):
     """Append evidence, or replay the exact saved request after a lost result.
 
 No retry rebases an old decision onto a new revision. The small request file is
@@ -92,8 +92,9 @@ the same durable recovery mechanism used by the other routine entry points.
             raise ValueError('resume uses the saved request, without replacement facts')
         request_path = Path(resume).resolve()
         bundle = json.loads(request_path.read_text(encoding='utf-8'))
-        if (not isinstance(bundle, dict) or set(bundle) != {'store_binding', 'request'}
-                or bundle['store_binding'] != binding):
+        if (not isinstance(bundle, dict) or not {'store_binding', 'request'} <= set(bundle) or set(bundle) - {'store_binding', 'request', 'evidence_repo'}
+                or bundle['store_binding'] != binding
+                or bundle.get('evidence_repo', str(Path(__file__).resolve().parents[1])) != str(Path(evidence_repo or Path(__file__).resolve().parents[1]).resolve())):
             raise ValueError('saved evidence request belongs to a different Store or backend')
         request = bundle['request']
         _check_request(request)
@@ -134,13 +135,13 @@ the same durable recovery mechanism used by the other routine entry points.
         directory.mkdir(exist_ok=True)
         request_path = directory / (tid.removeprefix('transition:') + '.evidence.json')
         with request_path.open('x', encoding='utf-8') as stream:
-            json.dump({'store_binding': binding, 'request': request}, stream, ensure_ascii=False, indent=2)
+            json.dump({'store_binding': binding, 'request': request, **({'evidence_repo': str(Path(evidence_repo).resolve())} if evidence_repo is not None else {})}, stream, ensure_ascii=False, indent=2)
             stream.write('\n'); stream.flush(); os.fsync(stream.fileno())
 
     report = {'request_path': str(request_path), 'transition_id': request['transition_id'],
               'work_key': request['changes'][0]['target']}
     try:
-        report['result'] = _apply_request(store_path, request, backend=backend)
+        report['result'] = _apply_request(store_path, request, backend=backend, evidence_repo=evidence_repo)
     except (ContextUnknown, TransitionDenied, TransitionConflict, UnsupportedTransition, TransitionError) as exc:
         report['result'] = {'result': 'rejected', 'category': type(exc).__name__, 'reason': str(exc)}
     except (OSError, StoreError, SnapshotInvalid):
@@ -170,13 +171,15 @@ def main():
     parser.add_argument('--related-entry', action='append', default=[],
                         help='existing record ID in this Work; repeat for explicit references, not automatic withdrawal')
     parser.add_argument('--resume', type=Path)
+    parser.add_argument('--evidence-repo', type=Path)
     args = parser.parse_args()
     if not args.store.is_absolute():
         parser.error('Store path must be absolute')
     try:
         report = record_evidence(args.store, backend=args.backend, actor=args.actor, work=args.work,
                                  summary=args.summary, sources=args.source, why=args.why,
-                                 occurred_at=args.occurred_at, related_entries=args.related_entry, resume=args.resume)
+                                 occurred_at=args.occurred_at, related_entries=args.related_entry, resume=args.resume,
+                                 evidence_repo=args.evidence_repo)
     except (OSError, StoreError, SnapshotInvalid) as exc:
         report = {'result': {'result': 'unknown', 'reason': str(exc)}}
     except (ValueError, TypeError, ContextUnknown, TransitionError) as exc:

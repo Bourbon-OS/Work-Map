@@ -4,7 +4,7 @@ from __future__ import annotations
 import hashlib
 from pathlib import Path
 
-from pma.workmap_close import repository_evidence
+from pma.workmap_close import repository_evidence, evidence_reader
 from pma.workmap_contract import validate_snapshot
 from pma.workmap_core import TransitionConflict, TransitionError, _digest
 from pma.workmap_pin_move import routine_pin_guard, pin_move_scope, resume_context
@@ -17,7 +17,7 @@ TEXT_FIELDS = ('reason', *RESUME_FIELDS, 'acceptance_basis', 'action_rule_basis'
 LIST_FIELDS = ('sources', 'reusable_refs', 'reuse_resume_fields')
 
 
-def pin_inputs_draft(snapshot, store_path, backend, *, actor, destination, where=None):
+def pin_inputs_draft(snapshot, store_path, backend, *, actor, destination, where=None, evidence_repo=None):
     """Bind a blank input draft to one current read; preserve old text as suggestions."""
     snapshot = validate_snapshot(snapshot)
     path = Path(store_path)
@@ -46,7 +46,7 @@ def pin_inputs_draft(snapshot, store_path, backend, *, actor, destination, where
     note = guard['resume_note']
     refs = refs | {GUIDE_REF} | set(held['refs'] if held else []) | set(note['refs'] if note else [])
     # Integrity only: hashing never means the operator has understood/appraised evidence.
-    evidence = {ref: hashlib.sha256(repository_evidence(ref)).hexdigest() for ref in sorted(refs)}
+    evidence = {ref: hashlib.sha256((repository_evidence if evidence_repo is None else evidence_reader(evidence_repo))(ref)).hexdigest() for ref in sorted(refs)}
     suggestions = {'status': 'absent', 'note_id': note_id, 'values': {}, 'review': 'not_reviewed'}
     if note is not None:
         try:
@@ -59,6 +59,7 @@ def pin_inputs_draft(snapshot, store_path, backend, *, actor, destination, where
         'store': {'path': str(path.resolve()), 'backend': backend},
         'project_id': snapshot['project_id'], 'revision': snapshot['revision'],
         'snapshot_digest': _digest(snapshot), 'evidence_digest': _digest(evidence),
+        **({'evidence_repo': str(Path(evidence_repo).resolve())} if evidence_repo is not None and Path(evidence_repo).resolve() != Path(__file__).resolve().parents[1] else {}),
         'actor': actor, 'source': source, 'destination': destination, 'where': where},
         # Ordinary input is reason + sources. Optional review/resume fields may
         # be added explicitly; do not present them all as a blank checklist.
@@ -66,18 +67,18 @@ def pin_inputs_draft(snapshot, store_path, backend, *, actor, destination, where
         'resume_suggestions': suggestions}
 
 
-def resolve_pin_inputs(packet, snapshot, store_path, backend):
+def resolve_pin_inputs(packet, snapshot, store_path, backend, *, evidence_repo=None):
     """Validate current bindings before any request/Owner capture; return existing CLI meaning."""
     if (not isinstance(packet, dict) or set(packet) != {'kind', 'binding', 'inputs', 'resume_suggestions'}
             or packet['kind'] != KIND or not isinstance(packet['binding'], dict)
-            or set(packet['binding']) != {'store', 'project_id', 'revision', 'snapshot_digest',
+            or set(packet['binding']) - {'evidence_repo'} != {'store', 'project_id', 'revision', 'snapshot_digest',
                 'evidence_digest', 'actor', 'source', 'destination', 'where'}):
         raise ValueError('expected an unchanged draft envelope with editable inputs only')
     binding = packet['binding']
     if binding['store'] != {'path': str(Path(store_path).resolve()), 'backend': backend}:
         raise TransitionConflict('draft belongs to another Store/backend')
     current = pin_inputs_draft(snapshot, store_path, backend, actor=binding['actor'],
-                               destination=binding['destination'], where=binding['where'])
+                               destination=binding['destination'], where=binding['where'], evidence_repo=evidence_repo)
     if binding != current['binding'] or packet['resume_suggestions'] != current['resume_suggestions']:
         raise TransitionConflict('draft revision, scope or evidence changed; read and review current inputs again')
     fields = packet['inputs']
@@ -108,7 +109,7 @@ def resolve_pin_inputs(packet, snapshot, store_path, backend):
             'reusable_refs': list(lists['reusable_refs'])}
 
 
-def check_prepared_pin_inputs(packet, snapshot, bundle):
+def check_prepared_pin_inputs(packet, snapshot, bundle, *, evidence_repo=None):
     """Do not bind a prepared request to evidence changed since draft validation."""
     request = bundle['request']
     guard = request['changes'][0]['expected']
@@ -119,6 +120,6 @@ def check_prepared_pin_inputs(packet, snapshot, bundle):
         refs = (refs | {GUIDE_REF} | set(guard['destination_pin']['refs'] if guard['destination_pin'] else [])
                 | set(guard['resume_note']['refs'] if guard['resume_note'] else []))
     hashes = {ref: bundle['source_bindings'][ref] if ref in bundle['source_bindings'] else
-              hashlib.sha256(repository_evidence(ref)).hexdigest() for ref in sorted(refs)}
+              hashlib.sha256((repository_evidence if evidence_repo is None else evidence_reader(evidence_repo))(ref)).hexdigest() for ref in sorted(refs)}
     if _digest(hashes) != packet['binding']['evidence_digest']:
         raise TransitionConflict('draft evidence changed during preparation; review again')
