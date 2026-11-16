@@ -1,0 +1,46 @@
+{
+  "protocol": 1,
+  "files": {
+    "WorkMap.pyw": "98e7201a9353fa203f648f62fcb848924922ca88748bb116c0ff4910668ef540",
+    "_workmap_runtime.py": "887feabe94315ba7a2f4903b92eee6ce98c626295e5674d4453ca9d80d9b338e",
+    "check.py": "98e7201a9353fa203f648f62fcb848924922ca88748bb116c0ff4910668ef540",
+    "maintenance/apply.ps1": "4bee5111373b396fc0922019dba3a914a7c73079be7b804eb744c81435618955",
+    "maintenance/file-functions.ps1": "27822af432521cb849164eebe9faf385e4536180e684f596f7354c4f7b445182",
+    "maintenance/prepare.py": "bca3a2e8fb3fb1927d34082728c0bbf24fe363b15826b0f72c31e04f45cde305",
+    "src/pma/__init__.py": "a087d3955bbe4bf45113ae9d55367df1ec48841c8b31942da07675a713a25258",
+    "src/pma/workmap_viewer.py": "d46ae9a429ded2085f5cd25c5bf683a9b3f366e33518cb07919d523196747d9f",
+    "tools/__init__.py": "195963952491d58a2c5b2e7e102eba9594cf8a14cf5f4663041d9ecb8752b971",
+    "tools/add_workmap_work.py": "195963952491d58a2c5b2e7e102eba9594cf8a14cf5f4663041d9ecb8752b971",
+    "tools/apply_workmap_transition.py": "195963952491d58a2c5b2e7e102eba9594cf8a14cf5f4663041d9ecb8752b971",
+    "tools/backup_workmap_store.py": "195963952491d58a2c5b2e7e102eba9594cf8a14cf5f4663041d9ecb8752b971",
+    "tools/close_workmap_work.py": "195963952491d58a2c5b2e7e102eba9594cf8a14cf5f4663041d9ecb8752b971",
+    "tools/cutover_workmap_store.py": "195963952491d58a2c5b2e7e102eba9594cf8a14cf5f4663041d9ecb8752b971",
+    "tools/move_workmap_pin.py": "195963952491d58a2c5b2e7e102eba9594cf8a14cf5f4663041d9ecb8752b971",
+    "tools/read_workmap_store.py": "195963952491d58a2c5b2e7e102eba9594cf8a14cf5f4663041d9ecb8752b971",
+    "tools/record_workmap_evidence.py": "195963952491d58a2c5b2e7e102eba9594cf8a14cf5f4663041d9ecb8752b971",
+    "tools/reparent_workmap_work.py": "195963952491d58a2c5b2e7e102eba9594cf8a14cf5f4663041d9ecb8752b971",
+    "tools/workmap_pin_inputs.py": "195963952491d58a2c5b2e7e102eba9594cf8a14cf5f4663041d9ecb8752b971",
+    "tools/workmap_pin_workflow.py": "195963952491d58a2c5b2e7e102eba9594cf8a14cf5f4663041d9ecb8752b971",
+    "tools/workmap_reparent_permission.py": "195963952491d58a2c5b2e7e102eba9594cf8a14cf5f4663041d9ecb8752b971",
+    "workmap.py": "98e7201a9353fa203f648f62fcb848924922ca88748bb116c0ff4910668ef540"
+  },
+  "control_files": [
+    "BOOTSTRAP.json",
+    "runtime-use.lock"
+  ],
+  "cli_modules": [
+    "check",
+    "pma.workmap_viewer",
+    "tools.add_workmap_work",
+    "tools.apply_workmap_transition",
+    "tools.backup_workmap_store",
+    "tools.close_workmap_work",
+    "tools.cutover_workmap_store",
+    "tools.move_workmap_pin",
+    "tools.read_workmap_store",
+    "tools.record_workmap_evidence",
+    "tools.reparent_workmap_work",
+    "tools.workmap_reparent_permission",
+    "workmap"
+  ]
+}
