@@ -19,6 +19,7 @@
     "tools/read_workmap_store.py": "195963952491d58a2c5b2e7e102eba9594cf8a14cf5f4663041d9ecb8752b971",
     "tools/record_workmap_evidence.py": "195963952491d58a2c5b2e7e102eba9594cf8a14cf5f4663041d9ecb8752b971",
     "tools/reparent_workmap_work.py": "195963952491d58a2c5b2e7e102eba9594cf8a14cf5f4663041d9ecb8752b971",
+    "tools/workmap_close_workflow.py": "195963952491d58a2c5b2e7e102eba9594cf8a14cf5f4663041d9ecb8752b971",
     "tools/workmap_pin_inputs.py": "195963952491d58a2c5b2e7e102eba9594cf8a14cf5f4663041d9ecb8752b971",
     "tools/workmap_pin_workflow.py": "195963952491d58a2c5b2e7e102eba9594cf8a14cf5f4663041d9ecb8752b971",
     "tools/workmap_reparent_permission.py": "195963952491d58a2c5b2e7e102eba9594cf8a14cf5f4663041d9ecb8752b971",

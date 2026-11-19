@@ -37,7 +37,11 @@ def file_marks(paths):
 
 def read_marker(source, paths=()):
     """Read one existing head value, without the snapshot BLOB or JSON parsing."""
-    with SQLiteStore(source.path).connection(read_only=True) as db:
+    store = SQLiteStore(source.path)
+    if source.state_trial:
+        from pma.workmap_state_store import StateStore
+        store = StateStore(source.path)
+    with store.connection(read_only=True) as db:
         row = db.execute('SELECT token FROM current WHERE id=1').fetchone()
     token = row[0] if row else None
     if (not isinstance(token, str) or len(token) != 64
@@ -57,7 +61,9 @@ def map_inputs(snapshot, *, people=False):
 
 def thread_inputs(data, labels):
     view = data['thread']
-    related = {key for entry in view['thread_entries'] for key in entry['related_entries']}
+    related = {key for entry in view['thread_entries'] for key in entry.get('related_entries', [])}
+    if data['snapshot'].get('format_version') == 'workmap-state-1':
+        related.update(entry['id'] for entry in view['thread_entries'])
     provenance = {r['id']: (r.get('actor'), r.get('occurred_at'), r.get('recorded_at'))
                   for r in data['snapshot']['thread_entries'] if r['id'] in related}
     return view['status'], view.get('reason'), view['thread_entries'], labels, provenance

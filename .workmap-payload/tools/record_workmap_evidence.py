@@ -176,7 +176,10 @@ def main():
     if not args.store.is_absolute():
         parser.error('Store path must be absolute')
     try:
-        report = record_evidence(args.store, backend=args.backend, actor=args.actor, work=args.work,
+        from pma.workmap_development_entry import write_new
+        report = write_new(args, 'result')
+        if report is None:
+            report = record_evidence(args.store, backend=args.backend, actor=args.actor, work=args.work,
                                  summary=args.summary, sources=args.source, why=args.why,
                                  occurred_at=args.occurred_at, related_entries=args.related_entry, resume=args.resume,
                                  evidence_repo=args.evidence_repo)

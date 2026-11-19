@@ -32,10 +32,18 @@ def copy_pin_guide(target):
     shutil.copyfile(ROOT / relative, dest)
 
 
+def scratch_directory(prefix):
+    path = Path(tempfile.gettempdir()).resolve()
+    # Keep copy/cleanup working for versioned evidence in a deeply extracted kit.
+    if os.name == 'nt' and not str(path).startswith('\\\\'):
+        path = Path('\\\\?\\' + str(path))
+    return tempfile.TemporaryDirectory(prefix=prefix, dir=path)
+
+
 class PersonalStarterCheck(unittest.TestCase):
     def test_isolated_lifecycle(self):
-        with tempfile.TemporaryDirectory(prefix='wm-') as temp:
-            target = Path(temp) / 'kit'
+        with scratch_directory('wm-') as temp:
+            target = Path(temp.removeprefix('\\\\?\\')) / 'kit'
             target.mkdir()
             for name in ('src', 'tools'):
                 shutil.copytree(ROOT / name, target / name, ignore=shutil.ignore_patterns('__pycache__'))
@@ -50,97 +58,80 @@ class PersonalStarterCheck(unittest.TestCase):
                 self.assertEqual(r.returncode == 0, success, r.stdout + r.stderr)
                 return r.stdout
             common = ['--name', '合成試験', '--intent', '判断理由を保つ', '--origin', '隔離確認', '--owner-instruction', 'この合成Workを登録する']
+            db = target / 'data/workmap.sqlite3'
             first = json.loads(run('init', *common))
-            self.assertEqual(first['readback']['display_id'], 'W0')
-            self.assertEqual(storage_shape(target/'data/workmap.sqlite3'), (0x41534841, 2, 2))
-            self.assertIn('W0', run('show'))
+            self.assertEqual(first['display_id'], 'W0')
+            self.assertEqual(storage_shape(db), (0x574D5354, 1, 1))
+            self.assertIn('新形式のMap', run('show'))
+            before = db.read_bytes()
             run('init', *common, success=False)
+            self.assertEqual(db.read_bytes(), before)
+
             added = json.loads(run('add', '--parent', 'W0', *common))
-            self.assertEqual(added['readback']['display_id'], 'W1')
-            self.assertEqual(json.loads(run('thread', '--work', 'W1'))['thread']['thread_entries'], [])
-            replay = json.loads(run('resume-add', '--request', added['request_path']))
-            self.assertEqual(replay['result'], added['result'])
+            self.assertEqual(added['status'], 'confirmed')
+            self.assertEqual(json.loads(run('thread', '--work', 'W1'))['thread_entries'], [])
+            self.assertFalse((target / 'data/transition-requests').exists())
             run('add', '--parent', 'W404', *common, success=False)
-            reason = json.loads(run('add', '--parent', 'W1', *common, '--reason', '独立して残す必要がある検証理由'))
-            self.assertEqual(len(reason['readback']['thread']['thread']['thread_entries']), 1)
-            detail = json.loads(run('show', '--work', 'W1'))['context']
-            self.assertEqual(detail['pins'], [])
-            self.assertEqual(detail['permissions'], [])
-            # New day-to-day entries must work from this extracted copy alone.
-            run('reason', '--work', 'W1', '--text', '未許可では記録しない', '--owner-instruction', 'この理由を残す', success=False)
-            run('permit', '--work', 'W0', '--map-add', '--owner-instruction', 'このMapの全Workの下への新規Work登録をOwnerに許可する')
-            run('permit', '--work', 'W1', '--map-add', '--owner-instruction', '子をMap全体の許可元と誤認しない', success=False)
-            day = json.loads(run('add', '--parent', 'W0', *common))
-            self.assertEqual(day['readback']['display_id'], 'W2')
-            run('pin', '--work', 'W2', '--reason', 'まだ未許可', '--owner-instruction', 'W2の引受', success=False)
-            run('permit', '--work', 'W2', '--edit', '--record', '--close', '--pin',
-                '--owner-instruction', 'W2の訂正、理由と結果の記録、本人Pinの引受・変更・解除、通常終了をOwnerに許可する')
-            recorded_reason = json.loads(run('reason', '--work', 'W2', '--text', '親目的に必要な通常確認に絞り、追加機能は比較後に判断する',
-                '--owner-instruction', 'この判断理由を記録する'))
-            self.assertEqual(json.loads(run('resume', '--request', recorded_reason['request_path']))['readback']['status'], 'confirmed')
+            run('add', '--parent', 'W1', *common, success=False)
+            record_args = ['--text', '電子版と紙版の両方を比較する', '--owner-instruction', 'この判断理由を記録する']
+            permit = ['permit', '--work', 'W1', '--edit', '--record', '--close', '--pin',
+                      '--owner-instruction', 'W1の指定操作をOwnerに許可する']
+            pin = ['pin', '--work', 'W1', '--reason', '比較を担当する', '--owner-instruction', 'W1を引き受ける']
+            run('reason', '--work', 'W1', *record_args, success=False)
+            run(*pin, success=False)
+            before = db.read_bytes()
+            run(*permit, '--actor', 'actor:synthetic-other', success=False)
+            self.assertEqual(db.read_bytes(), before)
+            run(*permit)
+            run('reason', '--work', 'W1', *record_args, success=False)
+            run(*pin)
+            run('reason', '--work', 'W1', *record_args)
+            detail = json.loads(run('resume', '--work', 'W1'))
+            self.assertEqual(detail['past_result'], 'unknown')
+            self.assertEqual(detail['current']['meaning'][0]['why'], record_args[1])
+            run('history', '--work', 'W1', success=False)
+
+            run('permit', '--work', 'W0', '--map-add', '--owner-instruction', 'このMapへの登録を許可する')
+            run('permit', '--work', 'W1', '--map-add', '--owner-instruction', 'W1はMap全体ではない', success=False)
+            run('add', '--parent', 'W1', *common)
+            run('permit', '--work', 'W1.1', '--pin', '--close', '--owner-instruction', 'W1.1の引受と終了を許可する')
+            run('pin', '--work', 'W1.1', '--reason', '確認へ切り替える', '--owner-instruction', 'W1.1を引き受ける')
+            run('close', '--work', 'W1.1', '--outcome', 'stopped', '--reason', '確認済みだった',
+                '--owner-instruction', 'この確認を打ち切る', '--release-own-pin')
+            run(*pin)
             proof = target / 'docs/work-management/evidence/proof.txt'
-            proof.write_text('合成確認の目的を達成した。通常の保存・再読と理由回収を確認。実業務の完了証明ではない。', encoding='utf-8')
-            recorded_result = json.loads(run('result', '--work', 'W2', '--text', '合成の確認を完了', '--source', 'repo:docs/work-management/evidence/proof.txt'))
-            self.assertEqual(json.loads(run('resume', '--request', recorded_result['request_path']))['readback']['status'], 'confirmed')
-            why = json.loads(run('thread', '--work', 'W2'))['thread']['thread_entries']
-            self.assertEqual(len(why), 1, why)
-            self.assertIn('追加機能', why[0]['why'])
-            first_pin = json.loads(run('pin', '--work', 'W2', '--reason', 'この仕事を引き受ける', '--owner-instruction', 'W2を本人の主作業として引き受ける'))
-            self.assertEqual(json.loads(run('resume', '--request', first_pin['request_path']))['readback']['status'], 'confirmed')
-            moved_pin = json.loads(run('pin', '--work', 'W1', '--reason', '通常の別Work切替', '--owner-instruction', '本人の主作業をW2からW1へ切り替える'))
-            self.assertEqual(json.loads(run('resume', '--request', moved_pin['request_path']))['readback']['status'], 'confirmed')
-            run('pin', '--work', 'W2', '--reason', '元の仕事へ戻る', '--owner-instruction', '本人の主作業をW1からW2へ戻す')
-            run('permit', '--work', 'W0', '--close', '--owner-instruction', '通常契約を満たす場合だけW0の終了を許可する')
-            run('close', '--work', 'W0', '--outcome', 'completed', '--reason', '子が残るので拒否される',
-                '--owner-instruction', 'W0を閉じる', '--evidence', 'repo:docs/work-management/evidence/proof.txt', success=False)
-            closed_result = json.loads(run('close', '--work', 'W2', '--outcome', 'completed', '--reason', '合成のIntentに必要な確認を終えた',
-                '--owner-instruction', 'W2をcompletedで閉じ本人Pinを解除する', '--release-own-pin',
-                '--evidence', 'repo:docs/work-management/evidence/proof.txt'))
-            self.assertEqual(json.loads(run('resume', '--request', closed_result['request_path']))['readback']['status'], 'confirmed')
-            self.assertNotIn('W2 ', run('show'))
-            closed_key = day.get('work_key') or day['readback'].get('work_key')
-            self.assertTrue(closed_key, day)
-            closed = json.loads(run('thread', '--work', closed_key))['thread']['thread_entries']
-            closure = next(e for e in closed if e.get('outcome') == 'completed')
-            self.assertTrue(all(closure['identity'].get(k) for k in ('name', 'intent', 'origin')))
-            run('pin', '--work', 'W1', '--reason', '終了後に保持中の仕事へ戻る', '--owner-instruction', '本人のW1 held Pinをactiveへ戻す')
-            backup_dir = target / 'backups'; backup_dir.mkdir()
+            proof.write_text('紙版の継続と電子版の試行を比較した。', encoding='utf-8')
+            ref = 'repo:docs/work-management/evidence/proof.txt'
+            run('result', '--work', 'W1', '--text', '比較を完了', '--source', ref)
+            close = ['close', '--work', 'W1', '--outcome', 'completed', '--reason', '比較を終えた',
+                     '--owner-instruction', '比較を完了として閉じる', '--release-own-pin']
+            run(*close, success=False)
+            run(*close, '--evidence', ref)
+            closed = json.loads(run('thread', '--work', added['work_key']))['thread_entries']
+            self.assertTrue(any(e.get('outcome') == 'completed' for e in closed))
+            self.assertTrue(any(e.get('why') == record_args[1] for e in closed))
+            self.assertEqual(storage_shape(db), (0x574D5354, 1, 2))
+
+            backup_dir = target / 'backups'
+            backup_dir.mkdir()
             backup = backup_dir / 'backup.json'
-            result = json.loads(run('backup', '--output', str(backup)))
-            self.assertEqual(storage_shape(target/'data/workmap.sqlite3'), (0x41534841, 2, 2))
-            candidate = target / 'recovery/candidate.sqlite3'
-            restored = json.loads(run('recover-check', '--backup', str(backup), '--sha256', result['sha256'], '--target', str(candidate)))
-            self.assertEqual(restored['management_recovery'], 'verified')
-            self.assertEqual(restored['role'], 'recovery_candidate')
-            self.assertEqual(storage_shape(candidate), (0x41534841, 2, 1))
-            run('recover-check', '--backup', str(backup), '--sha256', result['sha256'], '--target', str(target / 'data/workmap.sqlite3'), success=False)
-            self.assertIn('W1.1', run('show'))
-            view = json.loads(run('recovery-show', '--candidate', str(candidate), '--work', closed_key, '--thread'))
-            self.assertEqual(view['role'], 'recovery_candidate')
+            saved = json.loads(run('backup', '--output', str(backup)))
+            candidate = backup_dir / 'candidate.sqlite3'
+            check = ['recover-check', '--backup', str(backup), '--sha256', saved['sha256'], '--target']
+            original = db.read_bytes()
+            run(*check, str(db), success=False)
+            self.assertEqual(db.read_bytes(), original)
+            restored = json.loads(run(*check, str(candidate)))
+            self.assertEqual(restored['store_role'], 'recovery_candidate')
+            self.assertEqual(storage_shape(candidate), (0x574D5354, 1, 1))
+            view = json.loads(run('recovery-show', '--candidate', str(candidate), '--work', added['work_key'], '--thread'))
             self.assertTrue(view['read_only'])
-            self.assertTrue(any(e.get('outcome') == 'completed' for e in view['thread']['thread_entries']))
-            restore_args = ['--backup',str(backup),'--candidate',str(candidate),'--sha256',result['sha256'],
-                            '--candidate-token',view['candidate_token'],'--project-id',view['project_id'],
-                            '--owner-instruction','候補の目的・現在値・理由を確認し、元を保全して同じMapへ復旧する']
-            run('restore',*restore_args,success=False)
-            original = target / 'data/original-preserved.sqlite3'
-            original_bytes = (target / 'data/workmap.sqlite3').read_bytes()
-            (target / 'data/workmap.sqlite3').rename(original)
-            recovered = json.loads(run('restore',*restore_args))
-            self.assertEqual(storage_shape(target/'data/workmap.sqlite3'), (0x41534841, 2, 1))
-            self.assertNotEqual(recovered['readback']['revision'],result['revision'])
-            self.assertEqual(json.loads(run('resume','--request',recovered['request_path']))['readback']['status'],'confirmed')
-            self.assertIn('W1.1',run('show'))
-            self.assertTrue(any(e.get('outcome') == 'completed' for e in json.loads(run('thread','--work',closed_key))['thread']['thread_entries']))
-            run('permit','--work','W1','--record','--owner-instruction','復旧後の確認結果と判断理由をW1へ残すことを許可する')
-            run('reason','--work','W1','--text','確認したbackup時点から、残る不明を照合して再開する',
-                '--owner-instruction','この復旧後の判断理由を記録する')
-            self.assertTrue(any('残る不明' in e['why'] for e in json.loads(run('thread','--work','W1'))['thread']['thread_entries']))
-            self.assertEqual(original.read_bytes(),original_bytes)
+            self.assertEqual(view['thread_entries'], closed)
+            self.assertEqual(db.read_bytes(), original)
 
     def test_actual_gui_launcher_without_development_context(self):
-        with tempfile.TemporaryDirectory(prefix='wmg-') as temp:
-            target = Path(temp) / 'kit'; target.mkdir()
+        with scratch_directory('wmg-') as temp:
+            target = Path(temp.removeprefix('\\\\?\\')) / 'kit'; target.mkdir()
             for name in ('src', 'tools'):
                 shutil.copytree(ROOT / name, target / name, ignore=shutil.ignore_patterns('__pycache__'))
             for name in ('workmap.py', 'WorkMap.pyw'):
@@ -156,7 +147,7 @@ class PersonalStarterCheck(unittest.TestCase):
                 result = subprocess.run([sys.executable, '-I', '-X', 'utf8', 'workmap.py', *args], cwd=target, env=env, capture_output=True, text=True, encoding='utf-8')
                 self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
             probe = target / 'gui_probe.py'
-            probe.write_text('''import json, runpy, sys, time
+            probe.write_text('''import json, runpy, sys, time, traceback
 from pathlib import Path
 from unittest.mock import patch
 base=Path(__file__).resolve().parent
@@ -189,14 +180,11 @@ def loop(root,*args,**kw):
             assert app.sources[0].path==(base/'data/workmap.sqlite3').resolve()
             assert app.sources[0].evidence_root==base
             assert app.operator_id=='actor:local-owner'
+            assert app.sources[0].state_trial
             assert app.task_index_path is None
             assert app.tree.get_children(), 'Map tree is empty'
             assert app.app_icon.width()>0
             assert app.add_button.instate(['!disabled']), 'Map registration form is unavailable'
-            if relocated:
-                from pma.workmap_map_permission import map_add_permissions
-                key=app.data['snapshot']['aliases']['W0']
-                assert not map_add_permissions(app.data['snapshot'],key,'actor:local-owner',store_path=base/'data/workmap.sqlite3'), 'old location grant was inherited'
             app.auto_button.invoke(); assert app.auto_enabled.get()
             app.auto_button.invoke(); assert not app.auto_enabled.get()
             from pma.workmap_editor_ui import EditDialog
@@ -211,11 +199,32 @@ def loop(root,*args,**kw):
                 dialog.choose_button.invoke(); dialog.preview_button.invoke()
                 assert dialog.prepared is not None,dialog.message.get()
                 dialog.save_button.invoke()
-                assert dialog.last_result['status']=='confirmed',dialog.last_result
+                if relocated:
+                    assert dialog.last_result['status']=='rejected',dialog.last_result
+                else:
+                    assert dialog.last_result['status']=='confirmed',dialog.last_result
             dialog.destroy()
+            if not relocated:
+                deadline=time.monotonic()+5
+                while app.data is None and time.monotonic()<deadline:
+                    root.update()
+                    time.sleep(0.02)
+                assert app.data is not None, 'Map did not refresh after editing'
+                from pma.workmap_add_ui import AddWorkDialog
+                add=AddWorkDialog(app,key)
+                add.reload_snapshot()
+                for field,value in ((add.name_text,'画面で追加した仕事'),(add.intent_text,'操作を確かめる'),
+                                    (add.origin_text,'初期設定後の画面確認')):
+                    field.insert('1.0',value)
+                with patch('pma.workmap_editor_ui.filedialog.askopenfilenames',return_value=[str(evidence)]), patch('pma.workmap_add_ui.messagebox.askyesno',return_value=True):
+                    add.choose_button.invoke(); add.preview_button.invoke()
+                    assert add.prepared is not None,add.message.get()
+                    add.save_button.invoke()
+                    assert add.last_result and add.last_result['status']=='confirmed',add.message.get()
+                add.destroy()
             checked.append(True)
-        except Exception as exc:
-            errors.append(repr(exc))
+        except Exception:
+            errors.append(traceback.format_exc())
         finally:
             app.close_window()
     root.after(20,check); return original_loop(root,*args,**kw)
@@ -234,14 +243,16 @@ print(json.dumps({'gui':'started','own_map_only':True,'auto_on_off':True,'no_cod
             self.assertEqual(json.loads(result.stdout)['gui'], 'started')
             # Copy only this synthetic used kit, never the user's ROOT/data.
             original_bytes = (target / 'data/workmap.sqlite3').read_bytes()
-            relocated = Path(temp) / 'moved'
-            shutil.copytree(target, relocated, ignore=shutil.ignore_patterns('__pycache__'))
+            relocated = target.parent / 'moved'
+            shutil.copytree(Path(temp) / target.name, Path(temp) / relocated.name,
+                            ignore=shutil.ignore_patterns('__pycache__'))
             result = subprocess.run([sys.executable,'-I','-X','utf8',str(relocated/'gui_probe.py'),'relocated'],
                                     cwd=relocated,env=env,text=True,encoding='utf-8',capture_output=True,timeout=30)
             self.assertEqual(result.returncode,0,result.stdout+result.stderr)
             self.assertEqual((target/'data/workmap.sqlite3').read_bytes(),original_bytes)
-            missing = Path(temp) / 'missing-own-db'
-            shutil.copytree(target, missing, ignore=shutil.ignore_patterns('__pycache__'))
+            missing = target.parent / 'missing-own-db'
+            shutil.copytree(Path(temp) / target.name, Path(temp) / missing.name,
+                            ignore=shutil.ignore_patterns('__pycache__'))
             (missing/'data/workmap.sqlite3').rename(missing/'data/preserved.sqlite3')
             session_before = (missing/'data/viewer-session.json').read_bytes()
             result = subprocess.run([sys.executable,'-I','-X','utf8',str(missing/'gui_probe.py'),'missing'],

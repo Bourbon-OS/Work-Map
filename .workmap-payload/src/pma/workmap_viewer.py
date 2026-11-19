@@ -33,6 +33,9 @@ class OpenMap:
     path: Path
     evidence_root: Path
     project_id: str | None = None
+    state_trial: bool | None = False
+    map_id: str | None = None
+    require_current: bool = False
 
 
 def viewer_session_path() -> Path:
@@ -72,9 +75,29 @@ def _check_source_paths(source):
                 raise ValueError('ネットワークドライブは対象外です。PC内の正本を選んでください。')
 
 
+def state_source(source: OpenMap) -> bool:
+    if source.state_trial is not None:
+        return source.state_trial
+    from pma.workmap_normal_entry import is_state_store
+    return is_state_store(source.path)
+
+
+def state_source_read(source: OpenMap):
+    from pma.workmap_state_read import read_trial_state
+    read = read_trial_state(source.path, project_id=source.project_id, map_id=source.map_id)
+    if source.require_current and read.snapshot['metadata']['store_role'] != 'canonical_current':
+        raise ValueError('現在の正本として宣言されているDBではありません。')
+    return read
+
+
 def read_map_title(source: OpenMap) -> str:
     """Read only a menu label, not a verified snapshot or any decision data."""
     _check_source_paths(source)
+    if state_source(source):
+        snapshot = state_source_read(source).snapshot
+        children = {r['child'] for r in snapshot['map']['relations'] if r['kind'] == 'parent'}
+        names = [snapshot['works'][k]['name'] for k in snapshot['map']['members'] if k not in children]
+        return ' / '.join(names) or snapshot['project_id']
     store = SQLiteStore(source.path)
     with store.connection(read_only=True) as db:
         compressed = store._profile(db) == 'a'
@@ -125,6 +148,12 @@ def load_map(source: OpenMap) -> dict:
     """Reject absent/corrupt/replaced/noncurrent data; never initialize a DB."""
     _check_source_paths(source)
     file_before = file_marks((source.path,))
+    if state_source(source):
+        committed = state_source_read(source)
+        return {'snapshot': committed.snapshot,
+                'thread': {'status': 'confirmed', 'thread_entries': committed.snapshot['thread_entries']},
+                'selection_paths': (), 'refresh_marker': (committed.token, (), file_before),
+                'read_at': datetime.now().astimezone().isoformat(timespec='seconds')}
     committed = SQLiteStore(source.path).read(read_only=True)
     snapshot = validate_snapshot(committed.snapshot)
     if snapshot['metadata'].get('store_role') != 'canonical_current':
@@ -164,7 +193,7 @@ def current_record_text(records, snapshot, collection, actor_names=None, *, stor
         if collection == 'action_rules':
             lines = [record['statement'], '対象Work：' + targets]
             if record.get('applies_to'):
-                lines.append('適用する場面：' + record['applies_to'])
+                lines.append('適用する場面：' + describe(record['applies_to']))
             if record.get('clears_when'):
                 lines.append('外せる条件：' + record['clears_when'])
         else:
@@ -181,7 +210,9 @@ def current_record_text(records, snapshot, collection, actor_names=None, *, stor
             if MAP_ADD_OPERATION in record.get('operations', []):
                 lines[1] = '対象範囲：この正本Mapの現在・今後の全Workを親にした新規登録'
                 lines.append('範囲の基点：' + targets + '（普通の親Workの許可継承ではありません）')
-                if record not in map_add_permissions(snapshot, record['targets'][0], store_path=store_path):
+                if snapshot['format_version'] == 'workmap-state-1':
+                    lines[1] = '対象範囲：Map全体への追加許可の記録（この画面は閲覧専用）'
+                elif record not in map_add_permissions(snapshot, record['targets'][0], store_path=store_path):
                     lines.insert(0, '保存先・project・Map構造が一致しないため、このMap全体の許可は適用しません。')
             if record.get('constraints'):
                 lines.append('範囲・制約：' + describe(record['constraints']))
@@ -208,8 +239,32 @@ def describe(value, indent=0):
     return str(value)
 
 
+def detail_context(snapshot, key):
+    if snapshot['format_version'] != 'workmap-state-1':
+        return inspect_work(snapshot, key)
+    from pma.workmap_state_contract import chain, collection_status
+    path = chain(snapshot, key)
+    return {
+        'parent_chain': [dict(snapshot['works'][k], display_id=snapshot['display_ids'][k]) for k in path],
+        'pin_status': collection_status(snapshot, 'pins', key),
+        'permission_status': collection_status(snapshot, 'permissions', key),
+        'action_rule_status': collection_status(snapshot, 'action_rules', key),
+        'children': [dict(snapshot['works'][r['child']], display_id=snapshot['display_ids'][r['child']])
+                     for r in snapshot['map']['relations'] if r['kind'] == 'parent' and r['parent'] == key],
+        'dependencies': [r for r in snapshot['map']['relations'] if r['kind'] == 'dependency'
+                         and key in (r['consumer'], r['provider'])],
+    }
+
+
+def detail_results(snapshot, key):
+    if snapshot['format_version'] == 'workmap-state-1':
+        return [e for e in snapshot['evidence'] if key in e['works']], []
+    from pma.workmap_notes import actor_helpers, recorded_evidence
+    return recorded_evidence(snapshot, key), actor_helpers(snapshot, key)
+
+
 def work_details(data: dict, key: str) -> str:
-    s = data['snapshot']; context = inspect_work(s, key); work = s['works'][key]
+    s = data['snapshot']; context = detail_context(s, key); work = s['works'][key]
     chain = context['parent_chain']
     title = lambda k: s['display_ids'].get(k, k) + ' ' + s['works'].get(k, {}).get('name', '')
     blocks = [title(key), '目的\n' + describe(work['intent']),
@@ -229,9 +284,8 @@ def work_details(data: dict, key: str) -> str:
     ancestors = {p['work_key'] for p in chain[:-1]}
     inherited = [r for name in ('permissions', 'action_rules') for r in s['map'][name] if ancestors.intersection(r['targets'])]
     blocks.append('親側の許可・制約の記録（適用範囲の確認が必要）\n' + describe(inherited))
-    from pma.workmap_notes import actor_helpers, recorded_evidence
-    blocks.append('成果・根拠の記録（最新＝現在状態ではありません）\n' + describe(recorded_evidence(s, key)))
-    hints = actor_helpers(s, key)
+    results, hints = detail_results(s, key)
+    blocks.append('成果・根拠の記録（最新＝現在状態ではありません）\n' + describe(results))
     if hints:
         blocks.append('担当の過去の残し書き（回復補助・現在への適用は要確認）\n' + describe(hints))
     blocks.append('識別子\n' + key + '\n取得した版\n' + s['revision'])
@@ -245,13 +299,16 @@ def thread_work_labels(data: dict) -> dict:
               for k in s['map']['members']}
     for entry in data['thread']['thread_entries']:
         for k in entry['works']:
-            if k in labels or s['retirements'].get(k) not in entry['related_entries']:
+            if k in labels or s['retirements'].get(k) not in (entry['id'], *entry.get('related_entries', [])):
                 continue
             identity = entry.get('identity', {})
             if identity and identity.get('work_key') != k:
                 continue
-            if entry.get('display_id') and len(entry['works']) == 1:
-                labels[k] = {'label': entry['display_id'] + '（終了済み）',
+            address = entry.get('display_id')
+            if s['format_version'] == 'workmap-state-1' and s['retirements'].get(k) == entry['id']:
+                address = s['display_ids'][k]
+            if address and len(entry['works']) == 1:
+                labels[k] = {'label': address + '（終了済み）',
                              'name': identity.get('name', '')}
     for k in s['retirements']:
         labels.setdefault(k, {'label': s['display_ids'].get(k, k) + '（終了済み）', 'name': ''})
@@ -287,8 +344,10 @@ def thread_text(data: dict, key: str | None = None) -> str:
         # Recover chronology only on request through the existing raw IDs. Do
         # not mistake projection order or recording time for event time.
         raw = {e['id']: e for e in s['thread_entries']}
-        provenance = [raw[k] for k in entry['related_entries'] if k in raw]
-        block.append('関連する記録のID\n' + describe(entry['related_entries']))
+        related = entry.get('related_entries', [])
+        references = [entry['id'], *related] if s['format_version'] == 'workmap-state-1' else related
+        provenance = [raw[k] for k in dict.fromkeys(references) if k in raw]
+        block.append('関連する記録のID\n' + describe(related))
         block.append('参照する記録（ID：出来事／記録日時）\n' + '\n'.join(
             e['id'] + '：' + describe(e.get('occurred_at')) + ' ／ ' + describe(e.get('recorded_at'))
             + '\n記録した担当：' + describe(e.get('actor')) for e in provenance))
@@ -299,7 +358,8 @@ def thread_text(data: dict, key: str | None = None) -> str:
 class WorkMapViewer:
     def __init__(self, root: tk.Tk, current_actor: str | None = None, actor_names: dict | None = None,
                  operator_id: str | None = None, session_path: Path | None = None,
-                 background_reads: bool = False, task_index_path: Path | None = None):
+                 background_reads: bool = False, task_index_path: Path | None = None,
+                 state_trial: bool = False, trial_write: bool = False, shared_formats: bool = False):
         self.root = root; self.sources: list[OpenMap] = []; self.current = -1
         self.actor_names = dict(actor_names or {})
         self.task_index_path = task_index_path; self.resolved_actor_names = {}
@@ -307,14 +367,19 @@ class WorkMapViewer:
         self.actor_codes = {}
         self.data = None; self.focus_key = None; self.request_number = 0
         self.project_names = {}; self.open_nodes = {}; self.last_detail = None
-        self.session_path = session_path; self.session_error = None; self.session_writable = True
+        self.state_trial = state_trial
+        self.shared_formats = shared_formats
+        self.trial_write = state_trial and trial_write
+        self.session_path = None if state_trial else session_path
+        self.session_error = None; self.session_writable = not state_trial
         self.reader = ThreadPoolExecutor(max_workers=1) if background_reads else None
         self.pending_read = None; self.loading = False; self.closed = False
         self.read_poll = None; self.title_poll = None
         self.auto_epoch = 0; self.auto_timer = None; self.auto_poll = None
         self.auto_future = None; self.auto_interval_ms = 5000
         self.auto_failed = False; self.pending_automatic = False
-        root.title('Work Map — ローカル閲覧・編集'); root.geometry('1440x940'); root.minsize(1080, 700)
+        root.title('Work Map — 新形式の試験閲覧' if state_trial else 'Work Map — ローカル閲覧・編集')
+        root.geometry('1440x940'); root.minsize(1080, 700)
         icon_dir = Path(__file__).with_name('assets')
         self.app_icon = tk.PhotoImage(master=root, file=str(icon_dir / 'workmap.png'))
         root.iconphoto(True, self.app_icon)
@@ -410,8 +475,14 @@ class WorkMapViewer:
         self.connection = FoldSection(foot, '接続・取得情報', '')
         self.connection.pack(fill='x')
         self.location = self.connection.text
-        ttk.Button(self.connection.body, text='理由の根拠フォルダを選ぶ', command=self.choose_evidence).pack(anchor='w', pady=(0, 8))
-        tk.Label(page, text='編集は正規の許可・競合検査を使用   ·   ▶ 作業中  ⏸ 保持中   ·   A・B…は担当（右で詳細）   ·   ？は担当の記録に未確認あり   ·   F5で再取得',
+        if state_trial:
+            for button in (self.open_button, self.edit_button, self.add_button):
+                button.configure(state='disabled')
+        else:
+            ttk.Button(self.connection.body, text='理由の根拠フォルダを選ぶ', command=self.choose_evidence).pack(anchor='w', pady=(0, 8))
+        footer = ('新形式の試験用Map   ·   F5で再取得' if self.trial_write else
+                  '新形式の試験閲覧（読取専用）   ·   F5で再取得') if state_trial else '編集は正規の許可・競合検査を使用   ·   ▶ 作業中  ⏸ 保持中   ·   A・B…は担当（右で詳細）   ·   ？は担当の記録に未確認あり   ·   F5で再取得'
+        tk.Label(page, text=footer,
                  bg=PAPER, fg=MUTED, font=('Yu Gothic UI', 9), anchor='w', padx=26, pady=8).pack(side='bottom', fill='x', before=foot)
         # Reserve the footer before giving remaining height to the scrolling panes.
         panes.pack_forget(); panes.pack(fill='both', expand=True)
@@ -484,6 +555,8 @@ class WorkMapViewer:
                 if selected is not None and any(str(s.path) == selected for s in removed): selected = None
                 self.session_error = '保存場所が変わった同じMapの旧接続は開きません。必要なら保存先を確認して「Mapを開く」から選び直してください。'
                 self.status.configure(text=self.session_error, foreground=ACCENT)
+        if self.shared_formats:
+            sources = [replace(s, state_trial=None, require_current=True) for s in sources]
         self.sources = sources
         self.picker['values'] = [s.path.name for s in sources]
         if self.reader is None:
@@ -643,7 +716,7 @@ class WorkMapViewer:
 
     def edit_selected(self):
         selection = self.tree.selection()
-        if self.data is None or not selection:
+        if not self.editing_available() or not selection:
             return
         from pma.workmap_editor_ui import EditDialog
         self.editor = EditDialog(self, selection[0])
@@ -672,7 +745,7 @@ class WorkMapViewer:
         assignments = actor_assignments(s)
         pane.heading('誰が、何を引き受けているか', '現在のMap全体')
         pane.notice('検索や枝の折畳みにかかわらず、このMapに記録された担当を表示します。件数は作業量や余力を表しません。')
-        if any(inspect_work(s, k)['pin_status'] != 'confirmed' for k in s['map']['members']):
+        if any(detail_context(s, k)['pin_status'] != 'confirmed' for k in s['map']['members']):
             pane.notice('担当の記録に未確認のWorkがあります。未記録の担当や、このMap外の仕事は含みません。', warning=True)
         if not assignments:
             pane.notice('現在の担当の記録はありません。'); return
@@ -726,6 +799,9 @@ class WorkMapViewer:
             widget.configure(state='normal'); widget.delete('1.0', 'end'); widget.insert('1.0', content); widget.configure(state='disabled')
 
     def clear(self):
+        if self.state_trial or self.shared_formats:
+            for button in (self.add_button, self.edit_button):
+                button.configure(state='disabled')
         self.data = None; self.last_detail = None
         self.tree.delete(*self.tree.get_children())
         self.assignment_buttons = {}
@@ -744,7 +820,12 @@ class WorkMapViewer:
                 if evidence_root is not None:
                     source.evidence_root = evidence_root.resolve()
                 self.activate(i); return
-        self.sources.append(OpenMap(path, (evidence_root or path.parent).resolve()))
+        default_root = path.parent
+        if self.shared_formats and path.name == 'workmap.sqlite3' and default_root.name == 'data':
+            default_root = default_root.parent
+        self.sources.append(OpenMap(path, (evidence_root or default_root).resolve(),
+                                    state_trial=None if self.shared_formats else self.state_trial,
+                                    require_current=self.shared_formats))
         self.picker['values'] = [str(s.path) for s in self.sources]
         self.activate(len(self.sources) - 1)
 
@@ -787,7 +868,8 @@ class WorkMapViewer:
         if automatic:
             self.auto_note.configure(text='変更を取得しています…', fg=MUTED)
         else:
-            self.put(self.location, f'正本：{source.path}\n理由の根拠：{source.evidence_root}')
+            location = f'試験用DB：{source.path}' if self.state_trial else f'正本：{source.path}\n理由の根拠：{source.evidence_root}'
+            self.put(self.location, location)
             self.status.configure(text='読込み中…', foreground='#80551a')
             self.root.configure(cursor='watch')
             self.loading_message.configure(text='Mapを読み込んでいます')
@@ -841,6 +923,9 @@ class WorkMapViewer:
         tree_view = self.tree.yview()
         first_identity = source.project_id is None
         self.data = data; s = data['snapshot']; source.project_id = s['project_id']
+        source.state_trial = s.get('format_version') == 'workmap-state-1'
+        if source.state_trial:
+            source.map_id = s['map_id']
         resolved_names = local_actor_names(self.task_index_path, actor_assignments(s))
         names_changed = resolved_names != self.resolved_actor_names
         self.resolved_actor_names = resolved_names
@@ -856,7 +941,8 @@ class WorkMapViewer:
         self.loading_name.configure(text=self.project_names[str(source.path)])
         self.picker['values'] = [f"{i + 1:02d}  {self.project_names.get(str(item.path), item.path.name)}" for i, item in enumerate(self.sources)]
         self.picker.current(self.current)
-        self.put(self.location, f"正本：{source.path}\n理由の根拠：{source.evidence_root}\nプロジェクト：{s['project_id']}\n版：{s['revision']}\n取得：{data['read_at']}\n表示は本文を取得した時点の情報です。自動確認は版とファイル属性の確認で、本文の再検証とは区別します。")
+        location = f'試験用DB：{source.path}' if self.state_trial else f'正本：{source.path}\n理由の根拠：{source.evidence_root}'
+        self.put(self.location, f"{location}\nプロジェクト：{s['project_id']}\n版：{s['revision']}\n取得：{data['read_at']}\n表示は本文を取得した時点の情報です。自動確認は版とファイル属性の確認で、本文の再検証とは区別します。")
         if not old_data or thread_inputs(old_data, thread_work_labels(old_data)) != thread_inputs(data, thread_work_labels(data)):
             self.render_thread(self.all_thread)
         if self.focus_key not in s['map']['members']:
@@ -876,7 +962,15 @@ class WorkMapViewer:
                 self.tree.yview_moveto(tree_view[0])
         self.end_loading()
         self.auto_failed = False
-        self.status.configure(text=f"{len(s['map']['members'])} WORKS  /  {data['read_at'][11:19]} 取得", foreground=MUTED)
+        status = f"{len(s['map']['members'])} WORKS  /  {data['read_at'][11:19]} 取得"
+        writable = self.editing_available(loading_ok=True)
+        if self.shared_formats or source.state_trial:
+            for button in (self.add_button, self.edit_button):
+                button.configure(state='normal' if writable else 'disabled')
+        if source.state_trial and self.state_trial:
+            role = '復旧候補' if s['metadata']['store_role'] == 'recovery_candidate' else '試験Map'
+            status = f'{role}{"・試験編集" if writable else "・読取専用"}  /  {status}'
+        self.status.configure(text=status, foreground=MUTED)
         if data['thread']['status'] != 'confirmed':
             self.status.configure(text=self.status.cget('text') + '  /  理由に未確認あり', foreground=ACCENT)
         if self.auto_enabled.get():
@@ -886,7 +980,7 @@ class WorkMapViewer:
         self.schedule_auto()
 
     def add_work(self):
-        if self.data is None or self.loading:
+        if not self.editing_available():
             return
         if self.editor_open():
             self.editor.lift(); return self.editor
@@ -894,6 +988,13 @@ class WorkMapViewer:
         selected = self.tree.selection()
         self.editor = AddWorkDialog(self, selected[0] if selected else None)
         return self.editor
+
+    def editing_available(self, *, loading_ok=False):
+        if self.data is None or self.loading and not loading_ok:
+            return False
+        source = self.sources[self.current]
+        return (not source.state_trial or (self.trial_write or self.shared_formats)
+                and self.data['snapshot']['metadata']['store_role'] == 'canonical_current')
 
     def show_all(self):
         self.focus_key = None; self.search.set(''); self.render_tree()
@@ -935,7 +1036,7 @@ class WorkMapViewer:
             pins = [p for p in s['map']['pins'] if p['work_id'] == k]
             modes = [p['mode'] for p in pins]
             text = pin_badges(pins, self.actor_codes)
-            context = inspect_work(s, k)
+            context = detail_context(s, k)
             if context['pin_status'] != 'confirmed':
                 text += ' ？'
             self.tree.insert(parent, 'end', iid=k, text=s['display_ids'][k] + '  ' + s['works'][k]['name'],
@@ -982,8 +1083,21 @@ class WorkMapViewer:
             for field in ('identity', 'outcome', 'successor', 'residuals', 'consequence', 'revisit'):
                 if field in e:
                     content += '\n\n' + LABELS.get(field, field) + '\n' + describe(e[field])
-            provenance = [raw[k] for k in e['related_entries'] if k in raw]
-            meta = '根拠\n' + describe(e['source_refs']) + '\n\n関連する記録のID\n' + describe(e['related_entries'])
+            if e.get('original_reasons'):
+                content += '\n\n判断理由の原文\n' + describe(e['original_reasons'])
+            if e.get('historical'):
+                content += '\n\n判断時の補足\n' + describe(e['historical'])
+            related = e.get('related_entries', [])
+            state_trial = s.get('format_version') == 'workmap-state-1'
+            refs = [e['id'], *related] if state_trial else related
+            provenance = [raw[k] for k in dict.fromkeys(refs) if k in raw]
+            meta = '根拠\n' + describe(e['source_refs']) + '\n\n関連する記録のID\n' + describe(related)
+            if state_trial:
+                from pma.workmap_state_read import trial_source_locations
+                locations = trial_source_locations(self.sources[self.current].path, [e])
+                meta += '\n\n保存された根拠の場所（内容の照合は別）\n' + describe(locations)
+                if s['metadata'].get('migration') is not None and any(v is None for v in locations.values()):
+                    meta += '\n確認できない版は参照先を表示しています。'
             meta += '\n\n参照する記録（ID：出来事の日時 ／ 記録日時）\n'
             meta += '\n'.join(r['id'] + '：' + describe(r.get('occurred_at')) + ' ／ ' + describe(r.get('recorded_at'))
                                + '\n記録した担当：' + describe(r.get('actor')) for r in provenance)
@@ -997,7 +1111,7 @@ class WorkMapViewer:
         if self.last_detail == key:
             return
         self.last_detail = key
-        s = self.data['snapshot']; work = s['works'][key]; context = inspect_work(s, key)
+        s = self.data['snapshot']; work = s['works'][key]; context = detail_context(s, key)
         pane = self.details; pane.clear()
         pane.heading(work['name'], s['display_ids'][key])
         pane.section('purpose', '目的', describe(work['intent']), expanded=True, warning=work['intent'] is None)
@@ -1010,6 +1124,7 @@ class WorkMapViewer:
         pane.section('origin', '生まれた理由', describe(work['origin'].get('summary')), meta=describe(work['origin'].get('refs')))
         for name, status_field, label in [('action_rules','action_rule_status','行動ルール'), ('permissions','permission_status','許可の範囲')]:
             records = [r for r in s['map'][name] if key in r['targets']]
+            unknown_authority = False
             unknown = context[status_field] != 'confirmed'
             if name == 'permissions':
                 chain_keys = {w['work_key'] for w in context['parent_chain']}
@@ -1018,29 +1133,39 @@ class WorkMapViewer:
                 map_grants = [r for r in s['map']['permissions']
                               if MAP_ADD_OPERATION in r['operations'] and chain_keys.intersection(r['targets'])]
                 records += [r for r in map_grants if r not in records]
+                if s.get('format_version') == 'workmap-state-1':
+                    from pma.workmap_state_contract import permission_authority_status
+                    unknown_authority = any(permission_authority_status(s,r) == 'unknown' for r in records)
                 for grant in map_grants:
-                    root_context = inspect_work(s, grant['targets'][0])
+                    root_context = detail_context(s, grant['targets'][0])
                     unknown = unknown or any(root_context[f] != 'confirmed' for f in ('permission_status', 'action_rule_status'))
             suffix = '未確認あり' if unknown else (str(len(records)) + '件' if records else 'なし')
             content = current_record_text(records, s, name, self.resolved_actor_names | self.actor_names | self.display_actor_names(), store_path=self.sources[self.current].path)
+            if unknown_authority:
+                suffix = '根拠の版に未確認あり'
+                content = '版が未確認の根拠に基づく許可では書き込めません。\n\n' + content
             if unknown:
                 content = '集合の完全性は未確認。以下は記録された分だけです。\n\n' + content
-            pane.section(name, label + '  ·  ' + suffix, content, expanded=name == 'action_rules' and (bool(records) or unknown), warning=unknown or name == 'action_rules' and bool(records), meta=describe(records) if records else None)
+            pane.section(name, label + '  ·  ' + suffix, content, expanded=name == 'action_rules' and (bool(records) or unknown), warning=unknown or unknown_authority or name == 'action_rules' and bool(records), meta=describe(records) if records else None)
         chain = context['parent_chain']; ancestors = {p['work_key'] for p in chain[:-1]}
         inherited = [r for name in ('permissions','action_rules') for r in s['map'][name] if ancestors.intersection(r['targets'])]
-        unknown_ancestors = any(inspect_work(s, k)[f] != 'confirmed' for k in ancestors for f in ('permission_status','action_rule_status'))
+        unknown_ancestors = any(detail_context(s, k)[f] != 'confirmed' for k in ancestors for f in ('permission_status','action_rule_status'))
         pane.section('ancestors', '親側の許可・制約' + ('  ·  未確認あり' if unknown_ancestors else '  ·  適用範囲を確認'),
                      '親の許可をそのままこのWorkの許可にはしません。\n' + describe(inherited), warning=unknown_ancestors)
         relationships = ' → '.join(p['display_id'] + ' ' + p['name'] for p in chain)
         relationships += '\n\n子Work\n' + describe(context['children']) + '\n\n依存\n' + describe(context['dependencies'])
         pane.section('relations', '親・子・依存関係', relationships)
-        from pma.workmap_notes import actor_helpers, recorded_evidence
-        results = recorded_evidence(s, key)
+        results, hints = detail_results(s, key)
         if results:
             pane.section('results', '成果・根拠の記録', '記録時点の結果です。最新の記録だけで現在状態や他の未完了を確定しません。\n' + describe(results))
-        hints = actor_helpers(s, key)
         if hints:
             pane.section('notes', '担当の過去の残し書き', '回復の補助です。現在への適用は再確認してください。\n' + describe(hints))
+        migration = s['metadata'].get('migration')
+        if migration is not None:
+            review_notes = [note for note in migration['review_notes'] if key in note['targets']]
+            if review_notes:
+                pane.section('migration', '移行時の確認に使う以前のメモ',
+                             '記録当時の内容です。現在の判断にはMapを確認してください。\n' + describe(review_notes))
         pane.section('technical', '識別子・記録の詳細', 'Work識別子\n' + key + '\n\n担当の元記録\n' + describe(pins) + '\n\n取得した版\n' + s['revision'])
         self.render_thread(self.thread, key)
 

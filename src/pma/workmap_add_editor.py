@@ -25,6 +25,10 @@ class PreparedAdd:
 
 
 def prepare_add(source, snapshot, *, parent, name, intent, origin, actor, refs):
+    if getattr(source, 'state_trial', False):
+        from pma.workmap_state_entry import prepare_trial_add
+        return prepare_trial_add(source, snapshot, parent=parent, name=name, intent=intent, origin=origin,
+                                 actor=actor, refs=refs)
     state = validate_snapshot(copy.deepcopy(snapshot))
     if source.project_id is not None and source.project_id != state['project_id']:
         raise ValueError('編集中のMapが違います。読み直してください。')
@@ -39,6 +43,9 @@ def prepare_add(source, snapshot, *, parent, name, intent, origin, actor, refs):
 
 def inspect_add_result(prepared):
     """Read the same Transition ID; never create another Work to retry."""
+    if prepared.request.get('format_version') == 'workmap-state-1':
+        from pma.workmap_state_entry import inspect_trial_change
+        return inspect_trial_change(prepared)
     state = _current(prepared); request = prepared.request
     receipt = state['receipts'].get(request['transition_id'])
     if receipt is None:
@@ -57,6 +64,9 @@ def inspect_add_result(prepared):
 
 
 def save_add(prepared):
+    if prepared.request.get('format_version') == 'workmap-state-1':
+        from pma.workmap_state_entry import save_trial_change
+        return save_trial_change(prepared)
     if _digest(prepared.request) != prepared.request_digest:
         return {'status': 'rejected', 'message': '確認後に追加要求が変わりました。内容を確認し直してください。'}
     try:

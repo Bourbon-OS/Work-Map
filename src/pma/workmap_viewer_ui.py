@@ -96,6 +96,12 @@ def read_text(parent, content, *, large=False, muted=False):
     return text
 
 
+def wrap_to_width(widget, width, padding):
+    wrap = max(100, width - padding)
+    if widget.winfo_pixels(widget.cget('wraplength')) != wrap:
+        widget.configure(wraplength=wrap)
+
+
 class FoldSection(tk.Frame):
     def __init__(self, parent, title, content='', *, expanded=False, warning=False, meta=None):
         super().__init__(parent, bg=PAPER)
@@ -108,7 +114,7 @@ class FoldSection(tk.Frame):
                                 cursor='hand2', takefocus=True, highlightthickness=1,
                                 highlightbackground=PAPER, highlightcolor=ACCENT)
         self.button.pack(fill='x')
-        self.button.bind('<Configure>', lambda e: self.button.configure(wraplength=max(100, e.width - 25)))
+        self.button.bind('<Configure>', lambda e: wrap_to_width(self.button, e.width, 25))
         self.body = tk.Frame(self, bg=PAPER, padx=16)
         self.text = read_text(self.body, content)
         self.meta = None
@@ -163,7 +169,7 @@ class SectionPane(ttk.Frame):
                          fg='#794524' if warning else MUTED, justify='left', anchor='w',
                          padx=10 if warning else 0, pady=9, font=('Yu Gothic UI', 10))
         label.pack(fill='x', pady=(0, 12))
-        label.bind('<Configure>', lambda e: label.configure(wraplength=max(100, e.width - 24)))
+        label.bind('<Configure>', lambda e: wrap_to_width(label, e.width, 24))
         self.contents.append(text)
 
     def section(self, key, title, content, *, expanded=False, warning=False, meta=None):
