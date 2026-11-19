@@ -295,7 +295,11 @@ def main():
             raise ValueError('--inputs-json requires an input-draft object')
         if a.resume is None and a.inputs_json is None: supplied.setdefault('sources', [])
         workflow = a.owner_instruction is not None or a.owner_source is not None or a.reviewed_owner_pin
-        if workflow:
+        from pma.workmap_development_entry import write_new
+        report = write_new(a, 'pin', packet=packet)
+        if report is not None:
+            pass
+        elif workflow:
             from tools.workmap_pin_workflow import owner_pin_workflow
             report = owner_pin_workflow(a.store, backend=a.backend,
                 reviewed_pin_move=a.reviewed_pin_move, reviewed_owner_pin=a.reviewed_owner_pin,

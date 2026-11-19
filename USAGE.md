@@ -4,6 +4,8 @@
 
 ## 最初にすること
 
+v0.6.0で新しく作るMapは新形式です。すでに持っているMapは、保存先を指定してそのまま開けます。[従来形式からの利用継続](#既存のmapを使う方へ)も参照できます。
+
 1. ZIPを利用するWindows PCの**同期対象外のローカルフォルダ**へ展開します。例：`C:\WorkMapPersonal`。展開された`workmap.py`と`README.md`のあるフォルダを使います。OneDrive、共有フォルダ、ネットワークドライブ上では運用しません。
 2. エクスプローラーでそのフォルダを開き、上部のアドレスバーに`powershell`と入力してEnterを押します。開いたPowerShellで`python --version`を実行し、**Python 3.11以上**と表示されるか確認します。
    Pythonが見つからない、または3.11未満の場合は、[Python公式ダウンロードページ](https://www.python.org/downloads/)からWindows用を入手してインストールし、PowerShellを開き直してもう一度確認します。詳しい手順は[公式のWindows導入案内](https://docs.python.org/3/using/windows.html)にあります。
@@ -25,9 +27,7 @@ wm gui
 
 迷った時は、[最上位Work・目的・きっかけを書くヒント](docs/work-management/WORK_MAP_START.md#最上位のworkを考えるヒント)を使えます。
 
-新しいMapは圧縮して保存し、比較用の全体コピーを現在・直前の2版に抑えます。理由の原文や保存済み操作結果は現在データに残ります。
-
-ここまででMapを眺められます。追加・編集の許可設定は、実際にその操作を使う時に行います。
+新形式では、現在の仕事と判断に必要な理由・結果を残します。初期設定した編集者は、すぐにW0の下へWorkを登録できます。閲覧は許可設定なしで始められます。ほかの操作は使う時に設定します。
 
 <a id="shared-program"></a>
 
@@ -40,7 +40,7 @@ $mapRoot = 'C:\Maps\Another'
 wm show
 ```
 
-各Mapフォルダの下にDB（`data/workmap.sqlite3`）、根拠（`docs`）、保存要求（`data/transition-requests`）、GUIの接続一覧を置きます。Pin操作が根拠として参照する手順一件も、新規作成時にその版を保存します。DBがこの位置と異なる既存Mapは、その場所を変えず、[明示したDBと根拠を使う入口](docs/work-management/WORK_MAP_START.md#接続情報を一度渡す)を使います。
+各Mapフォルダの下にDB（`data/workmap.sqlite3`）、根拠（`docs`）、GUIの接続一覧を置きます。DBがこの位置と異なる既存Mapは、その場所を変えず、[明示したDBと根拠を使う入口](docs/work-management/WORK_MAP_START.md#接続情報を一度渡す)を使います。
 
 `wm`は毎回この`$mapRoot`を渡します。GUIで別Mapを選んでも、コマンドの対象は変わりません。Mapを明示したGUI起動は、そのMapと根拠の場所を優先し、覚えている他Mapは切替候補として残します。以下の例は使いたいMapの`$mapRoot`で続けます。
 
@@ -68,7 +68,7 @@ wm add --parent W0 --name "月次報告を整える" --intent "報告を受け�
 
 `--parent`には、Mapで確認した親Workの番号を指定します。登録内容を保存し、読み戻した結果が表示されます。登録しただけでは、その仕事を引き受けたり、実行を許可したことにはなりません。
 
-「後で行う」と決めた仕事も今登録します。後でやめるなら理由を残して閉じます。目的ときっかけはWorkに残るので、Threadに書き直す必要はありません。それだけでは残せない重要な理由がある場合だけ `add --reason "理由"` を付けられます。
+気になる案も登録しておけます。目的ときっかけはWorkに残ります。後から判断に必要になる理由は、[理由を残す手順](#引き受ける理由を残す終了する)でThreadへ記録します。
 
 ### 登録したWorkの操作を許可する
 
@@ -82,7 +82,7 @@ wm permit --work W1 --edit --record --pin --close --owner-instruction "W1の訂�
 
 自分のMapでも、「誰が操作するか」と「何をしてよいか」は分けて記録します。人とAIが同じMapを使った時に、担当になったことを、何でも変更してよいという許可と取り違えないためです。一人で使う場合は、自分で必要な操作を選びます。
 
-これは操作範囲の記録で、ログインや本人認証ではありません。AIに操作を任せる場合は、本人が決めた範囲だけを伝えます。
+新しく作ったMapでは、初期設定した編集者が、自分の操作を対象ごとに許可できます。既定の表示名はOwnerです。これは操作範囲の記録です。利用者の識別やファイルへのアクセスはPC側で管理し、AIには本人が決めた範囲と実際の指示を渡します。
 
 画面から新しいWorkを追加する時は、一度だけ、このMapへの追加を許可します。
 
@@ -90,7 +90,7 @@ wm permit --work W1 --edit --record --pin --close --owner-instruction "W1の訂�
 wm permit --work W0 --map-add --owner-instruction "このMapの現在・今後のWorkの下への新しいWork追加をOwnerに許可する"
 ```
 
-DBの保存先やprojectが変わった場合は、現在を確認してMapへの追加許可を設定し直します。プログラムだけの更新・移動で、同じDBの許可を取り直す必要はありません。
+許可はMapとDBの保存場所に結び付いています。プログラムだけを更新しても、同じDBの許可は使えます。Map自体を移す必要がある時は、元DBと根拠を保全して確認してください。
 
 今のGUIでは、追加内容の根拠になる文書も必要です。`docs`配下に、登録する名前・目的・生まれたきっかけを本人が採用したことを書いたテキストを保存し、「資料を選ぶ」から指定します。手元に文書を用意せず追加したい時は、上の「仕事を登録する」のコマンドを使えます。入力した登録指示から、必要な記録を作ります。
 
@@ -104,12 +104,9 @@ wm permit --work W0 --edit --owner-instruction "W0の名前・目的・出自の
 
 ## 現在地と理由を読む
 
-配置を変える必要がある時は、[同じWorkを別の親へ移す手順](docs/work-management/WORK_MAP_REPARENT.md)を使えます。普段の追加・閲覧の前提ではありません。
-
 - `show`：現在の仕事の木。
 - `show --work W1`：目的、親、担当、許可、行動ルール、依存、理由など。
 - `thread` または `thread --work W1`：将来の判断に必要な意味だけ。
-- `history --work W1`：操作の技術履歴を明示的に確認するとき。
 
 通常の登録直後にThreadが空でも異常ではありません。生まれた理由はWorkの目的ときっかけにあります。未確認の項目は、確認した結果「何もない」場合と区別して扱います。
 
@@ -120,10 +117,9 @@ AIへ必要な現在情報だけ渡す時は `wm show --work W1 --brief` を使�
 ```powershell
 wm show --work W1
 wm thread --work W1
-wm history --work W1
 ```
 
-順にWorkの詳細、Work Thread、技術履歴です。三つを毎回読む必要はありません。各コマンドは、実行した時点の最新を読みます。複数の結果を組み合わせて判断する時は、同じ版か確認します。判断や更新の前には、現在の目的・許可・行動ルール等を確認します。
+順にWorkの詳細とWork Threadです。必要な方を使います。各コマンドは、実行した時点の最新を読みます。複数の結果を組み合わせて判断する時は、同じ版か確認します。判断や更新の前には、現在の目的・許可・行動ルール等を確認します。
 
 AIや独自の連携から、同じ版の記録一件だけを追加で読みたい場合は、[絞り込んで読む方法](HANDOVER.md#同じ版の記録を絞り込んで読む)を使います。通常の閲覧は、上の画面やコマンドで始められます。
 
@@ -134,9 +130,7 @@ wm pin --work W1 --reason "月次報告の確認を主作業として引き受�
 wm reason --work W1 --text "受け手の判断に必要な内容を先に確認し、装飾は後で扱う" --owner-instruction "この判断理由を残す"
 ```
 
-別のWorkへ切り替える時も、同じ`pin`を使います。初めて担当を引き受ける時は、そのWorkのPin操作を`permit --pin`で許可します。現在の主作業からの切替や、保持しているWorkへ戻る時は、毎回の`permit`は要りません。主作業がなく、保持中のものとは別の新しいWorkを引き受ける場合も、対象の許可が必要です。
-
-返信待ちだけでheldへ変える必要はありません。行動ルールや依存関係、未確認事項で止まった時は、その内容と根拠を確かめてください。[Pinの詳しい条件と回復](docs/work-management/PIN_ROUTINE_ENTRY_2026-10-02.md)に、状況別の操作があります。
+別のWorkへも同じ`pin`で切り替えます。引き受けるWorkには`permit --pin`で操作範囲を設定しておきます。同じ許可が有効な間は、切替のたびに設定する必要はありません。行動ルールや依存関係で止まったら、その内容と根拠を確認します。
 
 `reason`は将来の判断に必要な「なぜ」です。試験・保存・成果の記録は、実際の根拠ファイルを作って `result` で接続します。結果を記録しても、ほかの残っている仕事が終わったことにはなりません。
 
@@ -145,54 +139,67 @@ wm result --work W1 --text "報告内容の確認結果" --source repo:docs/work
 wm close --work W1 --outcome completed --reason "元の目的を達成し残務を処遇した理由" --evidence repo:docs/work-management/evidence/report.txt --release-own-pin --owner-instruction "根拠と現在状態を確認してW1をcompletedで閉じ、本人Pinを解除する"
 ```
 
-`report.txt`は例です。実際の成果と判断を確認できるファイルへ置き換えます。completedにはIntent達成の根拠が必要です。取りやめは `stopped`、置換は `replaced` と `--successor` を使い、未実施を完了扱いにしません。子・他担当・依存・行動ルール・判断を変えるunknown等が残る場合は拒否されます。close後の名前・最終Intent・出自・終了理由はThreadから辿れます。親への復帰は自動ではなく、明示した存続Workへ `pin` で戻ります。
+`report.txt`は例です。実際の成果と判断を確認できるファイルへ置き換えます。達成した仕事は根拠を指定して`completed`、見送った仕事は`stopped`で終了します。子Workや他の担当、依存・行動ルールが残る場合は、先にその扱いを考えます。終了後も、Workの一意のIDを使えば最終の目的と判断理由をThreadから読めます。引き続き別Workを担当する時は、そのWorkを指定して`pin`します。
 
 ## 応答が分からなくなったとき
 
-新しい登録をやり直す前に `wm show` で現在Mapを確認します。CLI要求はMap側の `data/transition-requests/` に保存されます。操作に対応する入口へ、出力の **`request_path`にある絶対パス**を渡します。Map指定から要求ファイルの場所を推測し直す必要はありません。
-
-```powershell
-# CLIのinit／addで保存された追加要求
-wm resume-add --request "C:\Maps\Example\data\transition-requests\実際の追加要求ファイル名.json"
-
-# Pin切替・理由／結果記録・許可保存・close等の対応するCLI要求
-wm resume --request "C:\Maps\Example\data\transition-requests\実際の要求ファイル名.json"
-```
-
-追加要求は`resume-add`、その他の対応するCLI要求は`resume`で確認します。適用済みなら元IDと内容が一致する結果を回収し、その後の変更を巻き戻しません。未適用なら、準備時の根拠版と現在を照合してから進みます。準備時の版を持たない旧追加・親変更要求は自動再開せず、元要求を保ち、現在と根拠を読み直して判断します。古い要求へ今のhashや版を後付けしません。親変更・その許可補助の要求は、[元のmodule入口](docs/work-management/WORK_MAP_REPARENT.md)で回収します。
-
-GUIの訂正・追加で保存された要求は、このCLIへ流用しません。GUIの結果確認と現在Mapを照合し、なお不明なら元要求と根拠を保全して判断を引き継ぎます。GUI要求まで一つのコマンドで再確認できるという保証ではありません。
-
-結果を確認できない時は、実行済み・未実行を決めつけず、Map・履歴・本人の指示を照合します。DBや履歴を手編集して成功扱いにしません。初期化が空DB作成直後に中断し、要求ファイルがまだない場合は、元のdataとdocsを保全・退避し、新しいフォルダでinitから始め直します。既存データを削除してやり直す案内ではありません。
+まず`wm show`で現在のMapを見ます。登録や更新の応答が途切れたら、同じ操作をやり直す前に、対象を確認してください。Workが分かっていれば、例えば`wm resume --work W1`で現在の内容と理由・結果を読めます。終了済みWorkは一意のIDを使います。前の要求が実行されたかは未確認なので、読めた内容をもとに続け方を判断します。初期化途中で読めない時は、保存済みのDB・根拠を保全し、新しいフォルダで始めてください。
 
 ## バックアップと復旧確認
 
-新しい保存先フォルダを作って実行します。
+バックアップ先をMapとは別の場所に作ります。
 
 ```powershell
 New-Item -ItemType Directory C:\WorkMapBackups\day1
 wm backup --output C:\WorkMapBackups\day1\backup.json
 ```
 
-例の保存先はプログラム・Mapのフォルダの外です。可能なら別媒体へも保管してください。出力されたSHA-256と、同じ場所へ自動保存されたThread選別資料も一緒に保管します。**別途、対象Map側の `docs`と`data/transition-requests`、利用中の共用プログラムの配布物を保全してください。** 共用コードの写しを各Mapへ繰り返し作る必要はありません。DBのバックアップには、リンク先の社内文書や外部Artifactの実体は含まれません。バックアップは編集する第二正本ではありません。
+確定した一版と、確認した根拠が保存されます。バックアップと、表示されたSHA-256（確認値）を一緒に保管してください。必要な外部資料もそれぞれの保管先を確認します。
 
 ```powershell
 wm recover-check --backup C:\WorkMapBackups\day1\backup.json --sha256 "出力されたSHA-256" --target C:\WorkMapBackups\day1\candidate.sqlite3
 wm recovery-show --candidate C:\WorkMapBackups\day1\candidate.sqlite3 --work W0 --thread
 ```
 
-`recovery-show`は候補専用の読取であり、現在の正本として扱いません。`--work`を必要なWorkへ替えて、目的・担当・許可・行動ルール・理由と未確認を確認します。終了Workの理由も`--thread`から回収できます。
+候補は読取専用です。元のMapと分けて、必要なWorkの目的、理由、担当と許可を確かめます。新形式の候補を現在のMapへ戻す必要がある時は、元のDBと根拠を保全し、保守担当と手順を確認してください。
 
-通常利用へ戻す時は、すべてのGUI・書込処理を閉じます。元のDBとdocsを別の場所へ保全し、`data/workmap.sqlite3`を退避してください。`-journal`等が残っていれば、それも元DBと一緒に保全・退避します。下の操作は、DBや付随ファイルがまだある保存先には書きません。
+## 既存のMapを使う方へ
+
+すでにあるMapは、これまで使っていた保存先を`--map-dir`に渡して開きます。次のアップデートでは従来形式の対応を終える予定です。仕事を続ける方は、この版で[新形式へ移行](#legacy-map-migration)してください。後で旧Mapを参照する方は、DB・根拠と一緒にv0.6.0の配布版を保管してください。
+
+- **従来形式** — 既存の読取り・更新・復旧の手順は [v0.5.0の手順書](https://github.com/Bourbon-OS/workmap-personal-starter/blob/v0.5.0/USAGE.md)を参照できます。`history`や、保存済みの要求を確かめる`resume --request`（登録は`resume-add`）も使えます。親の変更は[従来形式の手順](docs/work-management/WORK_MAP_REPARENT.md)を参照してください。
+- **切替済みの新形式** — `wm show`の冒頭に「新形式のMap」と表示されます。画面、現在・理由の読取り、バックアップと復旧候補の確認を使えます。画面からの更新には切替先で確認した許可と根拠を使います。切替済みMapで権限を設定する時は、実際のOwner判断を照合する従来の引継ぎ手順に従ってください。新規の初期設定は、すでにあるMapの変換には使いません。
+
+<a id="legacy-map-migration"></a>
+
+## v0.5.0のMapを新形式へ移す
+
+旧Mapを開く画面と更新中の作業を閉じ、これまでの保存先を `$mapRoot` に指定します。元のMapを作成した編集者が、別の空のフォルダに確認用の候補を作ります。作成時に編集者IDを指定した方は、そのIDを `--actor` で渡します。
 
 ```powershell
-wm restore --backup C:\WorkMapBackups\day1\backup.json --sha256 "元backupのSHA-256" --candidate C:\WorkMapBackups\day1\candidate.sqlite3 --candidate-token "recovery-showのcandidate_token" --project-id "同じ表示のproject_id" --owner-instruction "候補の目的・現在値・理由と未確認を確認し、元を保全したうえでこのMapとして復旧する"
+$newMap = 'C:\Maps\Example-new'
+$check = wm migrate-prepare --target-map $newMap --owner-instruction "旧Mapを新形式へ移し、同じ編集者として使い続ける" | ConvertFrom-Json
+$check
+wm recovery-show --candidate "$newMap\data\workmap.sqlite3" --work W0 --thread
+```
+
+元Mapと候補で、Workの目的・関係・担当、必要な理由と根拠を見比べます。`--work` を確認したいWorkに替えてください。確認できない根拠は `unverified_sources` に出ます。版の記録がない資料は、移行時に見つかった内容を写します。候補を作る段階では、旧Mapの利用を再開できます。
+
+準備結果に出た `review_code` を、内容を確認した後に渡します。
+
+```powershell
+$code = $check.review_code
+wm migrate --target-map $newMap --reviewed $code
+$oldMap = $mapRoot
+$mapRoot = $newMap
 wm show
 ```
 
-選んだ候補と元backupが一致することを再確認して、空いている保存先へだけ復旧します。新しいrevisionを付けるため、復旧前の未適用要求を古い前提で黙って適用しません。保存先を移した場合のMap追加許可は、自動で結び直さず、必要なら新しい場所を確認して`permit --map-add`から設定し直します。
+先に旧Mapへの書込みを止め、新形式を使えるようにします。旧DB・根拠・操作記録は元のフォルダに残ります。Workと担当は引き継ぎます。旧版の許可は参照でき、今後使う操作の許可は作成者が `permit` で必要な分を設定します。移行先で操作が止まる場合は、対象の許可と既存の禁止・条件を確認してください。
 
-復旧は選んだbackup時点の回復です。その後に失われた更新、外部文書の実体・有効性、現在の許可は別に照合してください。不明は成功・未実行と決めつけません。復旧結果が不明なら、返された`.restore.json`を同じ`resume`で確認できます。
+応答が途切れた時は、同じ保存先と `review_code` で `migrate` を実行し、両側の状態を確かめます。新形式に書き込む前なら、旧Mapを指定して同じコマンドに `--rollback` を付けると旧Mapへ戻せます。戻した時は `$mapRoot = $oldMap` にします。候補の作成後に元のMapや根拠が変わった場合は、現在を確かめ、別の空のフォルダに候補を作り直してください。
+
+移行を止める項目が表示された場合は、旧Mapと根拠を保管し、v0.6.0で確認できます。開発用に別途作成したMapや、個別の変換確認を要する記録は、この手順の対象外です。
 
 ## 仕組みを育てる人へ
 
@@ -200,7 +207,7 @@ wm show
 
 この配布は個人向けローカル試用版です。会社で使う場合の実起動・利用条件は会社側で確認してください。全社導入の適合確認はしていません。利用後に作られる実Work・根拠・バックアップを公開リポジトリへコミットしないでください。
 
-動作確認は `python -X utf8 check.py`で行えます。使い捨ての写しで画面の起動と操作を確認するため、利用中のMapには触れません。以前のデータの移行は別に確認が必要です。新しいフォルダから試してください。
+動作確認は `python -X utf8 check.py`で行えます。使い捨ての写しで画面の起動と操作を確認するため、利用中のMapには触れません。初めて試す時は新しいフォルダを使います。
 
 ## ライセンス
 

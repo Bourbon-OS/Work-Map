@@ -2,7 +2,8 @@
 
 Meaning and authority remain with the local operator. Only request assembly,
 version binding, persistence and readback are mechanical. Residual disposition,
-granting authority, moving children and releasing other actors are not supported.
+moving children and releasing other actors are not supported. An optional explicit
+Owner instruction can prepare only the missing one-Work close authority.
 """
 from __future__ import annotations
 
@@ -108,19 +109,97 @@ def _readback(store_path, backend, request):
             'parent_at_close': history['parent_at_close'] if history else None}
 
 
+def _prepare_close_request(state, *, actor, work, outcome, reason, sources=(),
+                           evidence_refs=(), result=None, revisit=None, successors=(),
+                           residuals=(), release_own_pin=False, evidence_repo=None):
+    """The same input and evidence binding for ordinary and Owner-instructed close."""
+    _text(actor, 'actor'); _text(work, 'Work'); _text(reason, 'close reason')
+    if outcome not in ('completed', 'stopped', 'replaced'):
+        raise ValueError('choose completed, stopped or replaced explicitly')
+    refs, evidence = _refs(sources, 'source'), _refs(evidence_refs, 'achievement evidence')
+    if not refs:
+        raise ValueError('close needs an actual source reference')
+    if outcome == 'completed' and not evidence:
+        raise ValueError('completed needs Intent achievement evidence')
+    rest, following = _refs(residuals, 'residual disposition'), _refs(successors, 'successor')
+    if (outcome == 'replaced') != bool(following):
+        raise ValueError('named successors are required for replaced, and only for replaced')
+    for value, name in ((result, 'reported result'), (revisit, 'revisit condition')):
+        if value is not None:
+            _text(value, name)
+    if state['metadata'].get('store_role') != 'canonical_current':
+        raise ValueError('selected Store is not canonical current')
+    target = state['aliases'].get(work, work)
+    if target not in state['map']['members']:
+        raise ValueError('Work is not current; inspect its history instead')
+    successor_keys = [state['aliases'].get(key, key) for key in following]
+    if any(key not in state['map']['members'] or key == target for key in successor_keys):
+        raise ValueError('this command needs distinct current successor Works')
+    tid = 'transition:' + str(uuid4())
+    entry = {'id': 'thread:' + tid, 'works': [target], 'kind': 'close',
+             'summary': state['works'][target]['name'] + ': ' + outcome, 'why': reason,
+             'occurred_at': None, 'recorded_at': datetime.now(timezone.utc).isoformat(),
+             'actor': actor, 'source_refs': refs, 'transition_id': tid,
+             'outcome': outcome, 'residuals': rest}
+    if evidence:
+        entry['evidence_refs'] = evidence
+    if successor_keys:
+        entry['successor'] = list(dict.fromkeys(successor_keys))
+    if result is not None:
+        entry['consequence'] = result
+    if revisit is not None:
+        entry['revisit'] = revisit
+    changes = []
+    if release_own_pin:
+        own = [pin for pin in state['map']['pins'] if pin['work_id'] == target and pin['actor_id'] == actor]
+        if len(own) != 1:
+            raise ValueError('explicit own Pin release needs exactly one current own Pin')
+        changes.append({'op': 'remove_pin', 'target': target, 'pin_id': own[0]['id'], 'expected': own[0]})
+    changes.append({'op': 'close', 'target': target})
+    request = {'format_version': state['format_version'], 'project_id': state['project_id'],
+               'transition_id': tid, 'actor_id': actor, 'base_revision': state['revision'],
+               'intent': 'Close the specified reviewed Work, without choosing residual disposition',
+               'source_refs': refs, 'preconditions': [], 'changes': changes, 'thread_entries': [entry]}
+    request = bind_close_basis(state, request, resolver=repository_evidence if evidence_repo is None else evidence_reader(evidence_repo))
+    _check_request(request)
+    return request
+
+
+def _save_close_request(store_path, backend, request, evidence_repo):
+    directory = (store_path if backend == 'text' else store_path.parent) / 'transition-requests'
+    directory.mkdir(exist_ok=True)
+    request_path = directory / (request['transition_id'].removeprefix('transition:') + '.close.json')
+    with request_path.open('x', encoding='utf-8') as stream:
+        json.dump({'store_binding': {'path': str(store_path), 'backend': backend}, 'request': request,
+                   **({'evidence_repo': str(Path(evidence_repo).resolve())} if evidence_repo is not None else {})},
+                  stream, ensure_ascii=False, indent=2)
+        stream.write('\n'); stream.flush(); os.fsync(stream.fileno())
+    return request_path
+
+
 def close_work(store_path, *, backend, actor=None, work=None, outcome=None, reason=None,
                sources=(), evidence_refs=(), result=None, revisit=None, successors=(),
-               residuals=(), release_own_pin=False, reviewed_close=False, resume=None, evidence_repo=None):
+               residuals=(), release_own_pin=False, reviewed_close=False, resume=None, evidence_repo=None,
+               owner_source=None, reviewed_owner_close=False):
     """Assemble a reviewed one-Work close; replay never rebases an old decision."""
     started = perf_counter()
     store_path = Path(store_path).resolve()
     binding = {'path': str(store_path), 'backend': backend}
+    saved_header = json.loads(Path(resume).read_text(encoding='utf-8')) if resume is not None else None
+    owner_resume = isinstance(saved_header, dict) and saved_header.get('kind') == 'owner-close-workflow-v1'
+    if owner_source is not None or reviewed_owner_close or owner_resume:
+        from tools.workmap_close_workflow import owner_close_workflow
+        return owner_close_workflow(store_path, backend=backend, actor=actor, work=work, outcome=outcome,
+            reason=reason, sources=sources, evidence_refs=evidence_refs, result=result, revisit=revisit,
+            successors=successors, residuals=residuals, release_own_pin=release_own_pin,
+            reviewed_close=reviewed_close, resume=resume, evidence_repo=evidence_repo,
+            owner_source=owner_source, reviewed_owner_close=reviewed_owner_close)
     if resume is not None:
         if (any(value is not None for value in (actor, work, outcome, reason, result, revisit))
                 or sources or evidence_refs or successors or residuals or release_own_pin):
             raise ValueError('resume uses the saved request, without replacement decisions')
         request_path = Path(resume).resolve()
-        bundle = json.loads(request_path.read_text(encoding='utf-8'))
+        bundle = saved_header
         if (not isinstance(bundle, dict) or not {'store_binding', 'request'} <= set(bundle) or set(bundle) - {'store_binding', 'request', 'evidence_repo'}
                 or bundle['store_binding'] != binding
                 or bundle.get('evidence_repo', str(Path(__file__).resolve().parents[1])) != str(Path(evidence_repo or Path(__file__).resolve().parents[1]).resolve())):
@@ -130,63 +209,11 @@ def close_work(store_path, *, backend, actor=None, work=None, outcome=None, reas
     else:
         if not reviewed_close:
             raise TransitionDenied('review Intent, outcome, residuals, grants and sources before closing')
-        _text(actor, 'actor'); _text(work, 'Work'); _text(reason, 'close reason')
-        if outcome not in ('completed', 'stopped', 'replaced'):
-            raise ValueError('choose completed, stopped or replaced explicitly')
-        refs, evidence = _refs(sources, 'source'), _refs(evidence_refs, 'achievement evidence')
-        if not refs:
-            raise ValueError('close needs an actual source reference')
-        if outcome == 'completed' and not evidence:
-            raise ValueError('completed needs Intent achievement evidence')
-        rest = _refs(residuals, 'residual disposition')
-        following = _refs(successors, 'successor')
-        if (outcome == 'replaced') != bool(following):
-            raise ValueError('named successors are required for replaced, and only for replaced')
-        for value, name in ((result, 'reported result'), (revisit, 'revisit condition')):
-            if value is not None:
-                _text(value, name)
         state = validate_snapshot(open_store(store_path, backend).read().snapshot)
-        if state['metadata'].get('store_role') != 'canonical_current':
-            raise ValueError('selected Store is not canonical current')
-        target = state['aliases'].get(work, work)
-        if target not in state['map']['members']:
-            raise ValueError('Work is not current; inspect its history instead')
-        successor_keys = [state['aliases'].get(key, key) for key in following]
-        if any(key not in state['map']['members'] or key == target for key in successor_keys):
-            raise ValueError('this command needs distinct current successor Works')
-        tid = 'transition:' + str(uuid4())
-        entry = {'id': 'thread:' + tid, 'works': [target], 'kind': 'close',
-                 'summary': state['works'][target]['name'] + ': ' + outcome, 'why': reason,
-                 'occurred_at': None, 'recorded_at': datetime.now(timezone.utc).isoformat(),
-                 'actor': actor, 'source_refs': refs, 'transition_id': tid,
-                 'outcome': outcome, 'residuals': rest}
-        if evidence:
-            entry['evidence_refs'] = evidence
-        if successor_keys:
-            entry['successor'] = list(dict.fromkeys(successor_keys))
-        if result is not None:
-            entry['consequence'] = result
-        if revisit is not None:
-            entry['revisit'] = revisit
-        changes = []
-        if release_own_pin:
-            own = [pin for pin in state['map']['pins'] if pin['work_id'] == target and pin['actor_id'] == actor]
-            if len(own) != 1:
-                raise ValueError('explicit own Pin release needs exactly one current own Pin')
-            changes.append({'op': 'remove_pin', 'target': target, 'pin_id': own[0]['id'], 'expected': own[0]})
-        changes.append({'op': 'close', 'target': target})
-        request = {'format_version': state['format_version'], 'project_id': state['project_id'],
-                   'transition_id': tid, 'actor_id': actor, 'base_revision': state['revision'],
-                   'intent': 'Close the specified reviewed Work, without choosing residual disposition',
-                   'source_refs': refs, 'preconditions': [], 'changes': changes, 'thread_entries': [entry]}
-        request = bind_close_basis(state, request, resolver=repository_evidence if evidence_repo is None else evidence_reader(evidence_repo))
-        _check_request(request)
-        directory = (store_path if backend == 'text' else store_path.parent) / 'transition-requests'
-        directory.mkdir(exist_ok=True)
-        request_path = directory / (tid.removeprefix('transition:') + '.close.json')
-        with request_path.open('x', encoding='utf-8') as stream:
-            json.dump({'store_binding': binding, 'request': request, **({'evidence_repo': str(Path(evidence_repo).resolve())} if evidence_repo is not None else {})}, stream, ensure_ascii=False, indent=2)
-            stream.write('\n'); stream.flush(); os.fsync(stream.fileno())
+        request = _prepare_close_request(state, actor=actor, work=work, outcome=outcome, reason=reason,
+            sources=sources, evidence_refs=evidence_refs, result=result, revisit=revisit,
+            successors=successors, residuals=residuals, release_own_pin=release_own_pin, evidence_repo=evidence_repo)
+        request_path = _save_close_request(store_path, backend, request, evidence_repo)
 
     report = {'request_path': str(request_path), 'transition_id': request['transition_id'],
               'work_key': request['changes'][-1]['target']}
@@ -207,7 +234,7 @@ def close_work(store_path, *, backend, actor=None, work=None, outcome=None, reas
     return report
 
 
-def main():
+def main(argv=None, *, owner_confirmation=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--store', type=Path, required=True)
     parser.add_argument('--backend', choices=('text', 'sqlite'), required=True)
@@ -219,16 +246,22 @@ def main():
     parser.add_argument('--reviewed-close', action='store_true', help='Operator reviewed this close meaning and scope; grants no authority')
     parser.add_argument('--resume', type=Path)
     parser.add_argument('--evidence-repo', type=Path)
-    args = parser.parse_args()
+    parser.add_argument('--owner-source', help='Existing explicit Owner instruction for only this close/own Pin release')
+    parser.add_argument('--reviewed-owner-close', action='store_true', help='Operator checked explicit Owner scope; not authentication')
+    args = parser.parse_args(argv)
     if not args.store.is_absolute():
         parser.error('Store path must be absolute')
     try:
-        report = close_work(args.store, backend=args.backend, actor=args.actor, work=args.work,
+        from pma.workmap_development_entry import write_new
+        report = write_new(args, 'close', confirmation=owner_confirmation)
+        if report is None:
+            report = close_work(args.store, backend=args.backend, actor=args.actor, work=args.work,
                             outcome=args.outcome, reason=args.reason, sources=args.source,
                             evidence_refs=args.evidence, result=args.result, revisit=args.revisit,
                             successors=args.successor, residuals=args.residual,
                             release_own_pin=args.release_own_pin, reviewed_close=args.reviewed_close,
-                            resume=args.resume, evidence_repo=args.evidence_repo)
+                            resume=args.resume, evidence_repo=args.evidence_repo,
+                            owner_source=args.owner_source, reviewed_owner_close=args.reviewed_owner_close)
     except (OSError, StoreError, SnapshotInvalid) as exc:
         report = {'result': {'result': 'unknown', 'reason': str(exc)}}
     except (ValueError, TypeError, ContextUnknown, TransitionError) as exc:

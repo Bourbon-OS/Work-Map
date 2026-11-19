@@ -76,7 +76,7 @@ class AddWorkDialog(EditDialog):
         pending = getattr(app, 'pending_additions', {}).get(str(self.source.path.resolve()))
         if pending is not None:
             self.prepared = pending
-            change = pending.request['changes'][0]; work = change['value']['work']
+            change = self.change(); work = change['value']['work']
             self.set_parents(change['target'])
             for widget, value in ((self.name_text, work['name']), (self.intent_text, work['intent']),
                                   (self.origin_text, work['origin']['summary'])):
@@ -95,6 +95,10 @@ class AddWorkDialog(EditDialog):
         else:
             self.parent_input.set('親Workを選んでください')
 
+    def change(self):
+        request = self.prepared.request
+        return request if request.get('format_version') == 'workmap-state-1' else request['changes'][0]
+
     def preview(self):
         if self.prepared is not None: return
         try:
@@ -104,7 +108,7 @@ class AddWorkDialog(EditDialog):
                 name=self.name_text.get('1.0', 'end-1c'), intent=self.intent_text.get('1.0', 'end-1c'),
                 origin=self.origin_text.get('1.0', 'end-1c'), actor=self.actor_id, refs=self.refs)
             self.lock(); self.save_button.configure(state='normal'); self.back_button.configure(state='normal')
-            value = self.prepared.request['changes'][0]['value']
+            value = self.change()['value']
             self.preview_text.configure(text='追加予定：' + value['display_id'] + '　親：' + self.snapshot['display_ids'][parent])
             self.message.set('上の内容を確認してください。まだ追加していません。担当・Pin・実行許可は追加しません。')
         except (OSError, ValueError, KeyError, TransitionError, StoreError) as exc:
@@ -116,7 +120,7 @@ class AddWorkDialog(EditDialog):
             w.configure(state='disabled')
 
     def unlock(self):
-        if self.prepared and (self.prepared.request_path or self.last_result and self.last_result['status'] == 'unknown'):
+        if self.prepared and (getattr(self.prepared, 'request_path', None) or self.last_result and self.last_result['status'] == 'unknown'):
             self.message.set('追加要求は変更せず、同じ要求の結果を確認してください。'); return
         self.prepared = None; self.last_result = None
         for w in (self.editor_name, self.name_text, self.intent_text, self.origin_text, self.choose_button, self.preview_button):
@@ -128,11 +132,16 @@ class AddWorkDialog(EditDialog):
     def reload_snapshot(self):
         if not self.still_same_map():
             self.message.set('表示中のMapが変わりました。対象を確認し直してください。'); return
-        if self.prepared and (self.prepared.request_path or self.last_result and self.last_result['status'] == 'unknown'):
+        if self.prepared and (getattr(self.prepared, 'request_path', None) or self.last_result and self.last_result['status'] == 'unknown'):
             self.message.set('送信した追加要求は差し替えません。「追加結果を確認」を使ってください。'); return
         try:
             selected = self.parent_keys[self.parent_input.current()] if self.parent_input.current() >= 0 else None
-            state = validate_snapshot(SQLiteStore(self.source.path).read(read_only=True).snapshot)
+            if self.source.state_trial:
+                from pma.workmap_state_read import read_trial_state
+                state = read_trial_state(self.source.path, project_id=self.source.project_id,
+                                         map_id=self.source.map_id).snapshot
+            else:
+                state = validate_snapshot(SQLiteStore(self.source.path).read(read_only=True).snapshot)
             if state['project_id'] != self.snapshot['project_id'] or state['metadata'].get('store_role') != 'canonical_current':
                 raise ValueError('保存先のMapが変わりました。')
             self.snapshot = state; self.unlock(); self.set_parents(selected)
@@ -152,7 +161,7 @@ class AddWorkDialog(EditDialog):
         if not self.still_same_map():
             self.message.set('表示中のMapが変わりました。追加せず対象を確認し直してください。'); return
         self.save_button.configure(state='disabled')
-        change = self.prepared.request['changes'][0]; work = change['value']['work']
+        change = self.change(); work = change['value']['work']
         confirmation = ('追加：' + change['value']['display_id'] + '  ' + work['name'][:180]
             + '\n親：' + self.snapshot['display_ids'][change['target']] + '  ' + self.snapshot['works'][change['target']]['name']
             + '\n登録者：' + self.prepared.request['actor_id'] + '\n保存先：' + str(self.source.path)
@@ -171,7 +180,7 @@ class AddWorkDialog(EditDialog):
         if not hasattr(self.app, 'pending_additions'): self.app.pending_additions = {}
         if self.last_result['status'] == 'unknown':
             self.app.pending_additions[str(self.source.path.resolve())] = self.prepared
-        if self.prepared.request_path or self.last_result['status'] == 'unknown':
+        if getattr(self.prepared, 'request_path', None) or self.last_result['status'] == 'unknown':
             self.reload_button.configure(state='disabled'); self.check_result_button.configure(state='normal')
         elif self.last_result['status'] == 'rejected':
             self.back_button.configure(state='normal')
@@ -183,6 +192,9 @@ class AddWorkDialog(EditDialog):
         if self.last_result['status'] in ('confirmed', 'saved_but_changed') and self.still_same_map():
             self.app.operator_id = self.prepared.request['actor_id']
             self.app.refresh(select_key=self.last_result['work_key'])
+        if self.last_result['status'] == 'observed' and self.still_same_map():
+            self.app.refresh()
+            self.reload_button.configure(state='normal')
 
     def check_result(self):
         if self.prepared is None: return

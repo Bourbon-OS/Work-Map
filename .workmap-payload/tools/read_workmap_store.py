@@ -373,6 +373,17 @@ def read_result(directory: Path, display_id: str | None = None, *, tree: bool = 
     if entry_id is not None and not (history or thread or evidence or brief):
         raise ValueError('entry lookup requires explicit brief, thread, evidence or history mode')
     try:
+        if backend == 'sqlite':
+            from pma.workmap_development_entry import read_new
+            result = read_new(directory, display_id, expected_project=expected_project_id,
+                revision=expected_revision, tree=tree, tree_reader=id_title_tree,
+                brief=brief, thread=thread, evidence=evidence, selected=selected_ids,
+                pin_destination=pin_destination, actor=actor, pin_inputs=pin_inputs,
+                evidence_repo=evidence_repo or directory.parents[1],
+                unsupported=history or subtree or related or destination_where is not None
+                    or not (display_id or tree or pin_destination))
+            if result is not None:
+                return result
         store = open_store(directory, backend)
         committed = store.read(read_only=True) if backend == 'sqlite' and (pin_destination is not None or brief or evidence or subtree) else store.read()
         snapshot = validate_snapshot(committed.snapshot)

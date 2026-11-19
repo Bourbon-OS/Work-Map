@@ -246,7 +246,7 @@ class EditDialog(tk.Toplevel):
             widget.configure(state='disabled')
 
     def unlock(self):
-        if self.prepared and self.prepared.request_path:
+        if self.prepared and getattr(self.prepared, 'request_path', None):
             self.message.set('保存要求を送った後は、この画面で内容を差し替えません。結果を確認して閉じ、正本を読み直してください。')
             return
         self.prepared = None; self.save_button.configure(state='disabled'); self.back_button.configure(state='disabled')
@@ -259,7 +259,8 @@ class EditDialog(tk.Toplevel):
         return (self.app.data is not None and self.app.current >= 0
                 and self.app.sources[self.app.current].path.resolve() == self.source.path.resolve()
                 and self.app.sources[self.app.current].evidence_root.resolve() == self.source.evidence_root.resolve()
-                and self.app.data['snapshot']['project_id'] == self.snapshot['project_id'])
+                and self.app.data['snapshot']['project_id'] == self.snapshot['project_id']
+                and self.app.data['snapshot'].get('map_id') == self.snapshot.get('map_id'))
 
     def save(self):
         if self.prepared is None: return
@@ -298,14 +299,14 @@ class EditDialog(tk.Toplevel):
         if self.last_result['status'] in ('confirmed', 'saved_but_changed'):
             self.app.operator_id = self.prepared.request['actor_id']
             self.app.refresh()
-        if self.prepared.request_path or self.last_result['status'] == 'unknown':
+        if getattr(self.prepared, 'request_path', None) or self.last_result['status'] == 'unknown':
             self.check_result_button.configure(state='normal')
 
     def check_result(self):
         if not self.prepared: return
         try:
             self.last_result = inspect_edit_result(self.prepared); self.message.set(self.last_result['message'])
-            if self.still_same_map() and self.last_result['status'] in ('confirmed', 'saved_but_changed'):
+            if self.still_same_map() and self.last_result['status'] in ('confirmed', 'saved_but_changed', 'observed'):
                 self.app.refresh()
         except (OSError, ValueError, RuntimeError, TransitionError, StoreError) as exc:
             self.message.set('結果は未確認です。正本を読み直してください。' + str(exc))

@@ -59,6 +59,10 @@ class PreparedEdit:
 
 def prepare_edit(source, snapshot, work_key, *, field, value, actor, reason, refs,
                  kind=None, same_work_basis='', owner_reviewed=False):
+    if getattr(source, 'state_trial', False):
+        from pma.workmap_state_entry import prepare_trial_edit
+        return prepare_trial_edit(source, snapshot, work_key, field=field, value=value, actor=actor, reason=reason,
+                                  refs=refs, kind=kind, same_work_basis=same_work_basis, owner_reviewed=owner_reviewed)
     state = validate_snapshot(copy.deepcopy(snapshot))
     if state['metadata'].get('store_role') != 'canonical_current':
         raise ValueError('現在の正本以外は編集できません。')
@@ -128,6 +132,9 @@ def _current(prepared):
 
 
 def inspect_edit_result(prepared):
+    if prepared.request.get('format_version') == 'workmap-state-1':
+        from pma.workmap_state_entry import inspect_trial_change
+        return inspect_trial_change(prepared)
     """Re-read the exact submitted ID; never invent or resend a new request."""
     state = _current(prepared); request = prepared.request
     receipt = state['receipts'].get(request['transition_id'])
@@ -144,6 +151,9 @@ def inspect_edit_result(prepared):
 
 
 def save_edit(prepared):
+    if prepared.request.get('format_version') == 'workmap-state-1':
+        from pma.workmap_state_entry import save_trial_change
+        return save_trial_change(prepared)
     """Persist the usual request file, apply once, then check the Canonical Store."""
     if _digest(prepared.request) != prepared.request_digest:
         return {'status': 'rejected', 'message': '確認後に保存要求が変わりました。内容を確認し直してください。'}

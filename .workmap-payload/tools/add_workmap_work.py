@@ -137,7 +137,10 @@ def main():
     a = p.parse_args()
     if not a.store.is_absolute(): p.error('Store path must be absolute')
     try:
-        report = add_work(a.store, backend=a.backend, actor=a.actor, parent=a.parent,
+        from pma.workmap_development_entry import write_new
+        report = write_new(a, 'add')
+        if report is None:
+            report = add_work(a.store, backend=a.backend, actor=a.actor, parent=a.parent,
                           name=a.name, intent=a.intent, origin=a.origin, sources=a.source,
                           reason=a.reason, reviewed_owner_add=a.reviewed_owner_add,
                           owner_instruction=a.owner_instruction, resume=a.resume, root=a.root, display_id=a.display_id,
