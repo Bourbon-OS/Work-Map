@@ -3,12 +3,10 @@ import copy
 import tkinter as tk
 from tkinter import ttk, messagebox
 
-from pma.workmap_add_editor import prepare_add, save_add, inspect_add_result
-from pma.workmap_contract import validate_snapshot
-from pma.workmap_core import TransitionError
+from pma.workmap_desktop_edit import prepare_add, save_add, inspect_add_result, read_snapshot
+from pma.workmap_change_error import TransitionError
 from pma.workmap_editor_ui import EditDialog, ContextHelp
-from pma.workmap_sqlite_store import SQLiteStore
-from pma.workmap_store import StoreError
+from pma.workmap_store_types import StoreError
 from pma.workmap_viewer_ui import PAPER, INK, MUTED, ACCENT, actor_label
 
 
@@ -136,12 +134,7 @@ class AddWorkDialog(EditDialog):
             self.message.set('送信した追加要求は差し替えません。「追加結果を確認」を使ってください。'); return
         try:
             selected = self.parent_keys[self.parent_input.current()] if self.parent_input.current() >= 0 else None
-            if self.source.state_trial:
-                from pma.workmap_state_read import read_trial_state
-                state = read_trial_state(self.source.path, project_id=self.source.project_id,
-                                         map_id=self.source.map_id).snapshot
-            else:
-                state = validate_snapshot(SQLiteStore(self.source.path).read(read_only=True).snapshot)
+            state = read_snapshot(self.source)
             if state['project_id'] != self.snapshot['project_id'] or state['metadata'].get('store_role') != 'canonical_current':
                 raise ValueError('保存先のMapが変わりました。')
             self.snapshot = state; self.unlock(); self.set_parents(selected)

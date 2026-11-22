@@ -1,8 +1,8 @@
 # 共用プログラムを保守する方へ
 
-普段の利用は[USAGE](USAGE.md)のままです。ここでは、PCで共用するプログラムの設定と更新を扱います。MapのDB・根拠資料・保存要求は、それぞれのMapの場所に保ちます。
+普段の利用は[USAGE](USAGE.md)のままです。ここでは、PCで共用するプログラムの設定と更新を扱います。MapのDBと根拠資料は、それぞれのMapの場所に保ちます。
 
-共用版でも、旧Mapを移す方はMapごとに[新形式への移行手順](USAGE.md#legacy-map-migration)を使います。プログラムを更新した後も、既存のMapは保存している形式のまま開けます。
+プログラムの更新ではDBや根拠を移動しません。
 
 保守コマンドには、PythonとPowerShell 7（`pwsh`）を使います。普段の利用のために、保守コマンドを毎回実行する必要はありません。
 
@@ -24,7 +24,7 @@ $expected = $plan.bundle_sha256
 pwsh -NoProfile -File "$bundle\run.ps1" -ExpectedBundleHash $expected
 ```
 
-この段階ではプログラムを変更しません。返された対象と材料を確認し、**初回だけ、旧版を含む利用中の画面・処理の終了を合わせ、新しく起動しない区切り**を取ります。次を管理者のPowerShellから実行します。
+この段階ではプログラムを変更しません。返された対象と材料を確認し、**初回だけ、利用中の画面・処理の終了を合わせ、新しく起動しない区切り**を取ります。次を管理者のPowerShellから実行します。
 
 ```powershell
 pwsh -NoProfile -File "$bundle\run.ps1" -ExpectedBundleHash $expected -Mode Apply -UsageStopped
@@ -59,7 +59,7 @@ pwsh -NoProfile -File "$bundle\run.ps1" -ExpectedBundleHash $expected
 
 ## 初回の切替・固定入口を変える更新
 
-旧版がこの仕組みに参加しない場合や、更新前に読まれる入口・保守処理自身を替える場合は、通常の排他だけでは足りません。準備時に固定入口の違いを伝えられたら、利用停止の区切りを別に用意し、次のように材料を作ります。
+利用中かを検査する仕組みが利用側に備わっていない場合や、起動入口・保守処理を替える場合は、利用停止の区切りが必要です。準備時に固定入口の違いを伝えられたら、利用停止の区切りを別に用意し、次のように材料を作ります。
 
 ```powershell
 $plan = python "$candidate\maintenance\prepare.py" update --program "$program" --candidate "$candidate" --output "$bundle" --coordinated | ConvertFrom-Json

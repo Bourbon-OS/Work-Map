@@ -12,4 +12,3 @@ if _wm_runtime is None:
 if _wm_Path(_wm_runtime.__file__).absolute()!=_wm_root/'_workmap_runtime.py':
     raise ImportError('Work Map runtime identity differs.')
 _wm_runtime.join_package(_wm_root,globals(),__file__)
-_wm_runtime.run_payload(__file__,globals(),_wm_root)

@@ -17,7 +17,7 @@ GATE = 'runtime-use.lock'
 PENDING = 'UPDATE_PENDING.json'
 _readers = {}
 _reader_lock = allocate_lock()
-CLI_MODULES = ('check', 'pma.workmap_viewer', 'tools.add_workmap_work', 'tools.apply_workmap_transition', 'tools.backup_workmap_store', 'tools.close_workmap_work', 'tools.cutover_workmap_store', 'tools.move_workmap_pin', 'tools.read_workmap_store', 'tools.record_workmap_evidence', 'tools.reparent_workmap_work', 'tools.workmap_reparent_permission', 'workmap')
+CLI_MODULES = ('check', 'pma.workmap_viewer', 'tools.add_workmap_work', 'tools.close_workmap_work', 'tools.move_workmap_pin', 'tools.read_workmap_store', 'tools.record_workmap_evidence', 'workmap')
 
 class GateError(RuntimeError):
     status = 'shared_program_unavailable'
@@ -86,7 +86,7 @@ def _open(root, *, exclusive=False):
         raise
 
 def ensure_reader(root):
-    """Join once before any mutable code is loaded; legacy local kits stay local."""
+    """Join once before loading program code in a shared installation."""
     root=Path(os.path.abspath(root));key=os.path.normcase(str(root))
     with _reader_lock:
         if key in _readers:return _readers[key]

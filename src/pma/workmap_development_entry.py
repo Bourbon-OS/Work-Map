@@ -13,8 +13,8 @@ from pma.workmap_state_trial_integrated import (
     append_or_close, handle, operation_sources, source_binding, store_scope,
 )
 from pma.workmap_state_trial_permission_pin import prepare_pin, shared_scope
-from pma.workmap_store import StoreError
-from tools.workmap_pin_inputs import GUIDE_REF
+from pma.workmap_store_types import StoreError
+from pma.workmap_pin_guide import GUIDE_REF
 
 
 def key_for(state, work, *, current=True):
@@ -75,10 +75,10 @@ def read_selected(records, selected):
 
 def read_new(path, work, *, expected_project, revision, tree, tree_reader,
              brief, thread, evidence, selected, pin_destination, actor, pin_inputs,
-             evidence_repo, unsupported):
+             evidence_repo, unsupported, state_reader=open_normal_state):
     state = None
     try:
-        state = open_normal_state(path)
+        state = state_reader(path)
         if state is None:
             return None
         if expected_project is not None and expected_project != state['project_id']:
@@ -247,17 +247,17 @@ def close(args, core, state, key, confirmation):
     return append_or_close(args, core, state, key, confirmation, existing_close_authority=not explicit_owner)
 
 
-def write_new(args, operation, *, packet=None, confirmation=None):
+def write_new(args, operation, *, packet=None, confirmation=None, state_reader=open_normal_state):
     if args.backend != 'sqlite':
         return None
     try:
-        state = open_normal_state(args.store)
+        state = state_reader(args.store)
         if state is None:
             return None
         if state['metadata'].get('migration') is None:
             raise StateDenied('この入口の対象は変換済みのMapです。')
         if args.resume:
-            raise StateDenied('旧形式の保存要求は使えません。現在のMap・理由・結果を読み直してください。')
+            raise StateDenied('現在のMap・理由・結果を読み直してください。')
         args.evidence_repo = (args.evidence_repo or args.store.parents[1]).resolve()
         if args.evidence_repo != args.store.resolve().parents[1]:
             raise StateDenied('書込みの根拠はこのMapの文書フォルダに限ります。')

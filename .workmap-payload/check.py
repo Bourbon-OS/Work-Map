@@ -70,7 +70,6 @@ class PersonalStarterCheck(unittest.TestCase):
             added = json.loads(run('add', '--parent', 'W0', *common))
             self.assertEqual(added['status'], 'confirmed')
             self.assertEqual(json.loads(run('thread', '--work', 'W1'))['thread_entries'], [])
-            self.assertFalse((target / 'data/transition-requests').exists())
             run('add', '--parent', 'W404', *common, success=False)
             run('add', '--parent', 'W1', *common, success=False)
             record_args = ['--text', '電子版と紙版の両方を比較する', '--owner-instruction', 'この判断理由を記録する']
@@ -128,6 +127,44 @@ class PersonalStarterCheck(unittest.TestCase):
             self.assertTrue(view['read_only'])
             self.assertEqual(view['thread_entries'], closed)
             self.assertEqual(db.read_bytes(), original)
+
+            def restore(*, project=view['project_id'], token=view['candidate_token'],
+                        hash_value=saved['sha256'], success=True):
+                return run('restore', '--backup', str(backup), '--candidate', str(candidate),
+                           '--sha256', hash_value, '--candidate-token', token, '--project-id', project,
+                           '--owner-instruction', 'この候補の内容・担当・許可を照合し、保全した元の場所へ復旧する',
+                           success=success)
+
+            restore(success=False)
+            self.assertEqual(db.read_bytes(), original)
+            preserved = db.with_name('preserved.sqlite3')
+            db.rename(preserved)
+            candidate_after_loss = backup_dir / 'loss-check.sqlite3'
+            run(*check, str(candidate_after_loss))
+            restore(project='project:other', success=False)
+            restore(token='different-content', success=False)
+            restore(hash_value='0' * 64, success=False)
+            self.assertFalse(db.exists())
+            sidecar = db.with_name(db.name + '-journal')
+            sidecar.write_bytes(b'existing sidecar')
+            restore(success=False)
+            self.assertEqual(sidecar.read_bytes(), b'existing sidecar')
+            sidecar.unlink()
+
+            evidence_dir = candidate.with_name(candidate.name + '.evidence')
+            changed = next(evidence_dir.glob('*.source'))
+            content = changed.read_bytes()
+            changed.write_bytes(b'changed evidence')
+            restore(success=False)
+            self.assertFalse(db.exists())
+            changed.write_bytes(content)
+
+            reopened = json.loads(restore())
+            self.assertEqual(reopened['store_role'], 'canonical_current')
+            self.assertNotEqual(reopened['revision'], view['revision'])
+            self.assertEqual(json.loads(run('thread', '--work', added['work_key']))['thread_entries'], closed)
+            self.assertEqual(preserved.read_bytes(), original)
+            self.assertEqual(json.loads(run('add', '--parent', 'W0', *common))['status'], 'confirmed')
 
     def test_actual_gui_launcher_without_development_context(self):
         with scratch_directory('wmg-') as temp:

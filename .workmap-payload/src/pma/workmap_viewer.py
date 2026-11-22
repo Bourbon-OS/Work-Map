@@ -6,6 +6,7 @@ authority. No server, network client, cached snapshot or second Store.
 from __future__ import annotations
 
 import argparse
+
 import os
 import json
 import tempfile
@@ -18,14 +19,12 @@ import tkinter as tk
 from tkinter import ttk, filedialog
 from pma.workmap_viewer_ui import (SectionPane, FoldSection, actor_label, actor_code, pin_badges, actor_assignments, people_groups, PAPER, INK, MUTED, DARK, ACCENT)
 
-from pma.workmap_contract import validate_snapshot, inspect_work, SnapshotInvalid
-from pma.workmap_sqlite_store import SQLiteStore
-from pma.workmap_store import StoreError
-from pma.workmap_thread_view import meaning_thread, SelectionUnavailable
-from pma.workmap_viewer_refresh import (selection_paths, file_marks, read_marker,
-                                       map_inputs, thread_inputs, pane_state, restore_folds)
+from pma.workmap_desktop_extension import desktop_extension, extension_available
+from pma.workmap_store_types import StoreError
+from pma.workmap_viewer_refresh import (file_marks, read_marker, map_inputs, thread_inputs,
+                                       pane_state, restore_folds)
 from pma.workmap_actor_names import local_actor_names, local_task_index_path
-from pma.workmap_map_permission import map_add_permissions, MAP_ADD_OPERATION
+MAP_ADD_OPERATION = "add_work_in_map"
 
 
 @dataclass
@@ -36,6 +35,7 @@ class OpenMap:
     state_trial: bool | None = False
     map_id: str | None = None
     require_current: bool = False
+    state_only: bool = False
 
 
 def viewer_session_path() -> Path:
@@ -76,6 +76,8 @@ def _check_source_paths(source):
 
 
 def state_source(source: OpenMap) -> bool:
+    if source.state_only or not extension_available():
+        return True
     if source.state_trial is not None:
         return source.state_trial
     from pma.workmap_normal_entry import is_state_store
@@ -98,41 +100,7 @@ def read_map_title(source: OpenMap) -> str:
         children = {r['child'] for r in snapshot['map']['relations'] if r['kind'] == 'parent'}
         names = [snapshot['works'][k]['name'] for k in snapshot['map']['members'] if k not in children]
         return ' / '.join(names) or snapshot['project_id']
-    store = SQLiteStore(source.path)
-    with store.connection(read_only=True) as db:
-        compressed = store._profile(db) == 'a'
-        if not compressed:
-            row = db.execute("""
-            WITH header AS MATERIALIZED (
-              SELECT json_extract(CAST(s.body AS TEXT), '$.project_id', '$.metadata.store_role',
-                                  '$.works', '$.map.members', '$.map.relations') AS doc
-                FROM current c JOIN snapshots s ON s.token=c.token WHERE c.id=1)
-            SELECT json_extract(doc, '$[0]'), json_extract(doc, '$[1]'),
-              (SELECT group_concat(json_extract(w.value, '$.name'), ' / ')
-                 FROM json_each(doc, '$[2]') w
-                WHERE w.key IN (SELECT value FROM json_each(doc, '$[3]'))
-                  AND w.key NOT IN
-                    (SELECT json_extract(r.value, '$.child') FROM json_each(doc, '$[4]') r
-                      WHERE json_extract(r.value, '$.kind') = 'parent'))
-            FROM header
-            """).fetchone()
-    if compressed:
-        # Reuse the Store's bounded expansion and hash checks; no Thread view.
-        snapshot = store.read(read_only=True).snapshot
-        try:
-            members = set(snapshot['map']['members'])
-            children = {r['child'] for r in snapshot['map']['relations'] if r['kind'] == 'parent'}
-            names = [work['name'] for key, work in snapshot['works'].items()
-                     if key in members and key not in children]
-            row = (snapshot['project_id'], snapshot['metadata'].get('store_role'), ' / '.join(names))
-        except (KeyError, TypeError, AttributeError) as exc:
-            raise ValueError('現在の正本の名前を確認できません。') from exc
-    if row is None or row[1] != 'canonical_current' or not isinstance(row[0], str):
-        raise ValueError('現在の正本の名前を確認できません。')
-    if source.project_id is not None and source.project_id != row[0]:
-        raise ValueError('保存先のプロジェクトが変わっています。')
-    return row[2] or row[0]
-
+    return desktop_extension().read_title(source)
 
 def _read_titles(sources):
     result = []
@@ -154,21 +122,7 @@ def load_map(source: OpenMap) -> dict:
                 'thread': {'status': 'confirmed', 'thread_entries': committed.snapshot['thread_entries']},
                 'selection_paths': (), 'refresh_marker': (committed.token, (), file_before),
                 'read_at': datetime.now().astimezone().isoformat(timespec='seconds')}
-    committed = SQLiteStore(source.path).read(read_only=True)
-    snapshot = validate_snapshot(committed.snapshot)
-    if snapshot['metadata'].get('store_role') != 'canonical_current':
-        raise ValueError('現在の正本として宣言されているDBではありません。')
-    if source.project_id is not None and source.project_id != snapshot['project_id']:
-        raise ValueError('同じ保存先のプロジェクトが変わっています。開き直して確認してください。')
-    paths = selection_paths(snapshot, source.evidence_root)
-    before = file_marks(paths)
-    selection = meaning_thread(snapshot, repo=source.evidence_root)
-    after = file_marks(paths)
-    if before != after:
-        raise ValueError('理由の根拠資料が読取り中に変化しました。再読込してください。')
-    return {'snapshot': snapshot, 'thread': selection,
-            'selection_paths': paths, 'refresh_marker': (committed.token, after, file_before),
-            'read_at': datetime.now().astimezone().isoformat(timespec='seconds')}
+    return desktop_extension().load_map(source, file_before)
 
 
 LABELS = {'summary': '概要', 'refs': '参照', 'source_refs': '根拠', 'why': '理由',
@@ -212,7 +166,7 @@ def current_record_text(records, snapshot, collection, actor_names=None, *, stor
                 lines.append('範囲の基点：' + targets + '（普通の親Workの許可継承ではありません）')
                 if snapshot['format_version'] == 'workmap-state-1':
                     lines[1] = '対象範囲：Map全体への追加許可の記録（この画面は閲覧専用）'
-                elif record not in map_add_permissions(snapshot, record['targets'][0], store_path=store_path):
+                elif record not in desktop_extension().map_add_permissions(snapshot, record['targets'][0], store_path=store_path):
                     lines.insert(0, '保存先・project・Map構造が一致しないため、このMap全体の許可は適用しません。')
             if record.get('constraints'):
                 lines.append('範囲・制約：' + describe(record['constraints']))
@@ -241,7 +195,7 @@ def describe(value, indent=0):
 
 def detail_context(snapshot, key):
     if snapshot['format_version'] != 'workmap-state-1':
-        return inspect_work(snapshot, key)
+        return desktop_extension().inspect_work(snapshot, key)
     from pma.workmap_state_contract import chain, collection_status
     path = chain(snapshot, key)
     return {
@@ -259,8 +213,7 @@ def detail_context(snapshot, key):
 def detail_results(snapshot, key):
     if snapshot['format_version'] == 'workmap-state-1':
         return [e for e in snapshot['evidence'] if key in e['works']], []
-    from pma.workmap_notes import actor_helpers, recorded_evidence
-    return recorded_evidence(snapshot, key), actor_helpers(snapshot, key)
+    return desktop_extension().detail_results(snapshot, key)
 
 
 def work_details(data: dict, key: str) -> str:
@@ -359,16 +312,18 @@ class WorkMapViewer:
     def __init__(self, root: tk.Tk, current_actor: str | None = None, actor_names: dict | None = None,
                  operator_id: str | None = None, session_path: Path | None = None,
                  background_reads: bool = False, task_index_path: Path | None = None,
-                 state_trial: bool = False, trial_write: bool = False, shared_formats: bool = False):
+                 state_trial: bool = False, trial_write: bool = False, shared_formats: bool = False, state_only: bool = False):
         self.root = root; self.sources: list[OpenMap] = []; self.current = -1
         self.actor_names = dict(actor_names or {})
         self.task_index_path = task_index_path; self.resolved_actor_names = {}
         self.operator_id = operator_id
         self.actor_codes = {}
         self.data = None; self.focus_key = None; self.request_number = 0
+        self.all_thread_dirty = True
         self.project_names = {}; self.open_nodes = {}; self.last_detail = None
         self.state_trial = state_trial
         self.shared_formats = shared_formats
+        self.state_only = state_only or not extension_available()
         self.trial_write = state_trial and trial_write
         self.session_path = None if state_trial else session_path
         self.session_error = None; self.session_writable = not state_trial
@@ -470,7 +425,8 @@ class WorkMapViewer:
         self.thread = self.text_tab('Workの理由')
         self.thread_search = tk.StringVar(master=root)
         self.all_thread = self.text_tab('全体の理由', search_var=self.thread_search)
-        self.thread_search.trace_add('write', lambda *_: self.render_thread(self.all_thread) if self.data else None)
+        self.tabs.bind('<<NotebookTabChanged>>', lambda _: self.show_all_thread(keep_view=True))
+        self.thread_search.trace_add('write', self.search_all_thread)
         foot = tk.Frame(page, bg=PAPER, padx=26); foot.pack(side='bottom', fill='x')
         self.connection = FoldSection(foot, '接続・取得情報', '')
         self.connection.pack(fill='x')
@@ -556,7 +512,7 @@ class WorkMapViewer:
                 self.session_error = '保存場所が変わった同じMapの旧接続は開きません。必要なら保存先を確認して「Mapを開く」から選び直してください。'
                 self.status.configure(text=self.session_error, foreground=ACCENT)
         if self.shared_formats:
-            sources = [replace(s, state_trial=None, require_current=True) for s in sources]
+            sources = [replace(s, state_trial=None, require_current=True, state_only=self.state_only) for s in sources]
         self.sources = sources
         self.picker['values'] = [s.path.name for s in sources]
         if self.reader is None:
@@ -803,6 +759,7 @@ class WorkMapViewer:
             for button in (self.add_button, self.edit_button):
                 button.configure(state='disabled')
         self.data = None; self.last_detail = None
+        self.all_thread_dirty = True
         self.tree.delete(*self.tree.get_children())
         self.assignment_buttons = {}
         for widget in (self.people, self.details, self.thread, self.all_thread):
@@ -825,7 +782,7 @@ class WorkMapViewer:
             default_root = default_root.parent
         self.sources.append(OpenMap(path, (evidence_root or default_root).resolve(),
                                     state_trial=None if self.shared_formats else self.state_trial,
-                                    require_current=self.shared_formats))
+                                    require_current=self.shared_formats, state_only=self.state_only))
         self.picker['values'] = [str(s.path) for s in self.sources]
         self.activate(len(self.sources) - 1)
 
@@ -901,7 +858,7 @@ class WorkMapViewer:
             self.end_loading(); self.schedule_auto(); return
         try:
             data = load_map(source) if future is None else future.result()
-        except (OSError, ValueError, StoreError, SnapshotInvalid, SelectionUnavailable) as exc:
+        except (OSError, ValueError, StoreError) as exc:
             self.end_loading()
             if automatic:
                 self.auto_error(exc); self.schedule_auto(); return
@@ -919,7 +876,7 @@ class WorkMapViewer:
             # The user may have selected a different Work while the worker read.
             current_selection = self.tree.selection()
             selected = current_selection[0] if current_selection else None
-        saved_panes = {pane: pane_state(pane) for pane in (self.people, self.details, self.thread, self.all_thread)} if automatic else {}
+        saved_panes = {pane: pane_state(pane) for pane in (self.people, self.details, self.thread)} if automatic else {}
         tree_view = self.tree.yview()
         first_identity = source.project_id is None
         self.data = data; s = data['snapshot']; source.project_id = s['project_id']
@@ -943,8 +900,11 @@ class WorkMapViewer:
         self.picker.current(self.current)
         location = f'試験用DB：{source.path}' if self.state_trial else f'正本：{source.path}\n理由の根拠：{source.evidence_root}'
         self.put(self.location, f"{location}\nプロジェクト：{s['project_id']}\n版：{s['revision']}\n取得：{data['read_at']}\n表示は本文を取得した時点の情報です。自動確認は版とファイル属性の確認で、本文の再検証とは区別します。")
-        if not old_data or thread_inputs(old_data, thread_work_labels(old_data)) != thread_inputs(data, thread_work_labels(data)):
-            self.render_thread(self.all_thread)
+        self.all_thread_dirty = (
+            self.all_thread_dirty or not old_data
+            or thread_inputs(old_data, thread_work_labels(old_data)) != thread_inputs(data, thread_work_labels(data))
+        )
+        self.show_all_thread(keep_view=automatic)
         if self.focus_key not in s['map']['members']:
             self.focus_key = None
         self.last_detail = None
@@ -1060,6 +1020,22 @@ class WorkMapViewer:
             self.put(self.details, '該当するWorkはありません。'); self.put(self.thread, '')
         self.select_work()
 
+    def search_all_thread(self, *_):
+        self.all_thread_dirty = True
+        self.show_all_thread()
+
+    def show_all_thread(self, *, keep_view=False):
+        if not self.all_thread_dirty or self.data is None or self.tabs.select() != str(self.all_thread):
+            return
+        saved_view = pane_state(self.all_thread) if keep_view else None
+        self.render_thread(self.all_thread)
+        self.all_thread_dirty = False
+        if saved_view is not None:
+            restore_folds(self.all_thread, saved_view)
+            if saved_view[1]:
+                self.root.update_idletasks()
+                self.all_thread.canvas.yview_moveto(saved_view[1])
+
     def render_thread(self, pane, key=None):
         pane.clear(); data = self.data; s = data['snapshot']; selection = data['thread']
         pane.heading('判断の理由', 'WORK THREAD' if key else 'PROJECT THREAD')
@@ -1170,7 +1146,7 @@ class WorkMapViewer:
         self.render_thread(self.thread, key)
 
 
-def main():
+def main(*, default_source=None):
     parser = argparse.ArgumentParser(description='Work Map local viewer and permitted editor')
     parser.add_argument('--store', type=Path, action='append', default=[], help='initial SQLite paths; repeat to open multiple Maps')
     parser.add_argument('--evidence-root', type=Path, help='evidence root for the first Map; others can be selected in the window')
@@ -1186,16 +1162,23 @@ def main():
         ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID('Ashiba.WorkMap.Reader')
     names = dict(args.actor_name)
     names.setdefault('actor:human:owner', 'Owner')
+    default_root = None
+    preferred = None
+    if not args.store and default_source is not None:
+        project, path, default_root = default_source
+        preferred = (project, path)
+        args.store = [path]
     root = tk.Tk(); app = WorkMapViewer(root, actor_names=names, operator_id=args.operator_id,
                                        session_path=viewer_session_path(), background_reads=True,
-                                       task_index_path=local_task_index_path())
-    app.restore_session()
+                                       task_index_path=local_task_index_path(), shared_formats=True)
+    app.restore_session(preferred_source=preferred)
     for i, path in enumerate(args.store):
+        evidence_root = (args.evidence_root or default_root) if i == 0 else None
         existing = next((s for s in app.sources if s.path == path.resolve()), None)
-        if existing is None:
-            app.add_source(path, args.evidence_root if i == 0 else None)
-        elif i == 0 and args.evidence_root is not None:
-            existing.evidence_root = args.evidence_root.resolve()
+        if existing is None or (preferred is not None and i == 0):
+            app.add_source(path, evidence_root)
+        elif evidence_root is not None:
+            existing.evidence_root = evidence_root.resolve()
             if app.current >= 0 and app.sources[app.current] is existing:
                 app.refresh()
             app.save_session()

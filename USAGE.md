@@ -4,7 +4,7 @@
 
 ## 最初にすること
 
-v0.6.0で新しく作るMapは新形式です。すでに持っているMapは、保存先を指定してそのまま開けます。[従来形式からの利用継続](#既存のmapを使う方へ)も参照できます。
+新しく始めるときはMapを作り、すでにMapを持っている場合はその保存先を指定します。
 
 1. ZIPを利用するWindows PCの**同期対象外のローカルフォルダ**へ展開します。例：`C:\WorkMapPersonal`。展開された`workmap.py`と`README.md`のあるフォルダを使います。OneDrive、共有フォルダ、ネットワークドライブ上では運用しません。
 2. エクスプローラーでそのフォルダを開き、上部のアドレスバーに`powershell`と入力してEnterを押します。開いたPowerShellで`python --version`を実行し、**Python 3.11以上**と表示されるか確認します。
@@ -161,51 +161,26 @@ wm recover-check --backup C:\WorkMapBackups\day1\backup.json --sha256 "出力さ
 wm recovery-show --candidate C:\WorkMapBackups\day1\candidate.sqlite3 --work W0 --thread
 ```
 
-候補は読取専用です。元のMapと分けて、必要なWorkの目的、理由、担当と許可を確かめます。新形式の候補を現在のMapへ戻す必要がある時は、元のDBと根拠を保全し、保守担当と手順を確認してください。
+候補は読取専用です。必要なWorkの目的、理由、結果、根拠を確かめます。元のDBが開けない場合も、バックアップから候補を確認できます。
+
+### 元の保存先で再開する
+
+バックアップ以降の変更、現在の担当と許可を確認し、この候補で再開するか決めます。更新を止め、元のDB・SQLiteの付随ファイル・根拠を保全して、空いた元の保存先を指定します。下の確認値はバックアップと候補の値に置き換えてください。候補の確認結果の`project_id`と`candidate_token`を使います。
+
+    wm restore --backup C:\WorkMapBackups\day1\backup.json --candidate C:\WorkMapBackups\day1\candidate.sqlite3 --sha256 "バックアップのSHA-256" --candidate-token "候補の確認値" --project-id "確認したMapのproject_id" --owner-instruction "この候補の内容と担当・許可を確認し、保全した元の保存先で再開する"
+    wm show --work W0 --brief
+
+空いた元の保存先に新しい版を作ります。そこ以外へ復旧する場合や、バックアップから元の保存先を確認できない場合は、元のDBと根拠を保全し、保守担当と手順を確認してください。
 
 ## 既存のMapを使う方へ
 
-すでにあるMapは、これまで使っていた保存先を`--map-dir`に渡して開きます。次のアップデートでは従来形式の対応を終える予定です。仕事を続ける方は、この版で[新形式へ移行](#legacy-map-migration)してください。後で旧Mapを参照する方は、DB・根拠と一緒にv0.6.0の配布版を保管してください。
-
-- **従来形式** — 既存の読取り・更新・復旧の手順は [v0.5.0の手順書](https://github.com/Bourbon-OS/workmap-personal-starter/blob/v0.5.0/USAGE.md)を参照できます。`history`や、保存済みの要求を確かめる`resume --request`（登録は`resume-add`）も使えます。親の変更は[従来形式の手順](docs/work-management/WORK_MAP_REPARENT.md)を参照してください。
-- **切替済みの新形式** — `wm show`の冒頭に「新形式のMap」と表示されます。画面、現在・理由の読取り、バックアップと復旧候補の確認を使えます。画面からの更新には切替先で確認した許可と根拠を使います。切替済みMapで権限を設定する時は、実際のOwner判断を照合する従来の引継ぎ手順に従ってください。新規の初期設定は、すでにあるMapの変換には使いません。
-
-<a id="legacy-map-migration"></a>
-
-## v0.5.0のMapを新形式へ移す
-
-旧Mapを開く画面と更新中の作業を閉じ、これまでの保存先を `$mapRoot` に指定します。元のMapを作成した編集者が、別の空のフォルダに確認用の候補を作ります。作成時に編集者IDを指定した方は、そのIDを `--actor` で渡します。
-
-```powershell
-$newMap = 'C:\Maps\Example-new'
-$check = wm migrate-prepare --target-map $newMap --owner-instruction "旧Mapを新形式へ移し、同じ編集者として使い続ける" | ConvertFrom-Json
-$check
-wm recovery-show --candidate "$newMap\data\workmap.sqlite3" --work W0 --thread
-```
-
-元Mapと候補で、Workの目的・関係・担当、必要な理由と根拠を見比べます。`--work` を確認したいWorkに替えてください。確認できない根拠は `unverified_sources` に出ます。版の記録がない資料は、移行時に見つかった内容を写します。候補を作る段階では、旧Mapの利用を再開できます。
-
-準備結果に出た `review_code` を、内容を確認した後に渡します。
-
-```powershell
-$code = $check.review_code
-wm migrate --target-map $newMap --reviewed $code
-$oldMap = $mapRoot
-$mapRoot = $newMap
-wm show
-```
-
-先に旧Mapへの書込みを止め、新形式を使えるようにします。旧DB・根拠・操作記録は元のフォルダに残ります。Workと担当は引き継ぎます。旧版の許可は参照でき、今後使う操作の許可は作成者が `permit` で必要な分を設定します。移行先で操作が止まる場合は、対象の許可と既存の禁止・条件を確認してください。
-
-応答が途切れた時は、同じ保存先と `review_code` で `migrate` を実行し、両側の状態を確かめます。新形式に書き込む前なら、旧Mapを指定して同じコマンドに `--rollback` を付けると旧Mapへ戻せます。戻した時は `$mapRoot = $oldMap` にします。候補の作成後に元のMapや根拠が変わった場合は、現在を確かめ、別の空のフォルダに候補を作り直してください。
-
-移行を止める項目が表示された場合は、旧Mapと根拠を保管し、v0.6.0で確認できます。開発用に別途作成したMapや、個別の変換確認を要する記録は、この手順の対象外です。
+今使っているMapフォルダを指定して開きます。ショートカットや起動スクリプトも、今の保存先を指しているか確かめてください。
 
 ## 仕組みを育てる人へ
 
 [HANDOVER.md](HANDOVER.md)に設計・プログラムの配置・拡張時の確認事項があります。終了したWorkを戻す操作、関係変更、複雑な残務の処遇など、ここで案内していない操作を追加する場合は、そちらを参照してください。
 
-この配布は個人向けローカル試用版です。会社で使う場合の実起動・利用条件は会社側で確認してください。全社導入の適合確認はしていません。利用後に作られる実Work・根拠・バックアップを公開リポジトリへコミットしないでください。
+この版は1台のWindows PCで使います。会社で使う場合の起動・利用条件は会社側で確認してください。全社導入の適合確認はしていません。利用後に作られる実Work・根拠・バックアップを公開リポジトリへコミットしないでください。
 
 動作確認は `python -X utf8 check.py`で行えます。使い捨ての写しで画面の起動と操作を確認するため、利用中のMapには触れません。初めて試す時は新しいフォルダを使います。
 
