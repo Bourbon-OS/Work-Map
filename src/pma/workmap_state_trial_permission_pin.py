@@ -15,7 +15,7 @@ PERMIT_OPTIONS = {
     'pin': ('set_pin', 'move_pin', 'remove_pin'),
     'map_add': ('add_work_in_map',),
 }
-LEGACY_RESTRICTIONS = {
+IMPORTED_RESTRICTIONS = {
     'set_pin': ('add_pin', 'update_pin', 'append_thread'),
     'move_pin': ('add_pin', 'update_pin', 'append_thread'),
     'append_meaning': ('append_thread', 'append_scoped_thread'),
@@ -23,11 +23,11 @@ LEGACY_RESTRICTIONS = {
 }
 
 
-def legacy_denial(state, key, actor, operations):
+def require_no_permission_restrictions(state, key, actor, operations):
     """An imported denial still applies; its allow counterpart is never inferred."""
     restrictions = set(operations)
     for op in operations:
-        restrictions.update(LEGACY_RESTRICTIONS.get(op, ()))
+        restrictions.update(IMPORTED_RESTRICTIONS.get(op, ()))
     scope = set(chain(state, key))
     if any(p['grantee'] == actor and p['effect'] != 'allow' and scope.intersection(p['targets'])
            and restrictions.intersection(p['operations']) for p in state['map']['permissions']):
@@ -35,7 +35,7 @@ def legacy_denial(state, key, actor, operations):
 
 
 def shared_scope(state, actor, target, op):
-    """Use the old Pin selector's endpoint and same-location rules on current state."""
+    """Find current Pins at the same location as either endpoint."""
     endpoints = {target}
     if op == 'move_pin':
         endpoints.update(p['work_id'] for p in state['map']['pins']

@@ -12,7 +12,7 @@ from pma.workmap_state_entry import PreparedStateChange, save_trial_change, tria
 from pma.workmap_state_read import read_trial_state, trial_local_path
 from pma.workmap_state_sources import local_file
 from pma.workmap_state_store import StateStore
-from pma.workmap_state_trial_permission_pin import PERMIT_OPTIONS, legacy_denial, prepare_pin
+from pma.workmap_state_trial_permission_pin import PERMIT_OPTIONS, require_no_permission_restrictions, prepare_pin
 
 
 COMMANDS = ('permit', 'pin', 'reason', 'result', 'close')
@@ -140,7 +140,7 @@ def permit(args, core, state, key, confirmation, *, seed=None):
         # who initialized this Map at this location. It is not user authentication.
         if seed['grantee'] != args.actor or seed['constraints'] != list(scope_constraints):
             raise StateDenied('この保存先でMapを初期設定した編集者を確認してください。')
-        legacy_denial(state, key, args.actor, ('set_permission',))
+        require_no_permission_restrictions(state, key, args.actor, ('set_permission',))
         bindings.append(source_binding(core, seed['source_refs'][0]))
         if args.close:
             operations.add('remove_permission')
@@ -151,7 +151,7 @@ def permit(args, core, state, key, confirmation, *, seed=None):
             operations.add('remove_permission')
         if allowed != operations:
             raise StateDenied('Ownerが確認した対象・操作と一致しません。')
-    legacy_denial(state, key, args.actor, operations)
+    require_no_permission_restrictions(state, key, args.actor, operations)
     if seed is not None:
         ref = capture_personal_instruction(core.store.path.parents[1], args.owner_instruction)
         binding = source_binding(core, ref)
@@ -171,7 +171,7 @@ def operation_sources(args, root, db, state, required):
     core = trial_core(db, root)
     found = {}
     for key, operation in required:
-        legacy_denial(state, key, args.actor, (operation,))
+        require_no_permission_restrictions(state, key, args.actor, (operation,))
         failed = None
         for grant in state['map']['permissions']:
             if (grant['grantee'] != args.actor or grant['targets'] != [key] or grant['effect'] != 'allow'

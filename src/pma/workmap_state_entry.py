@@ -12,7 +12,7 @@ from pma.workmap_state_core import StateCore, prepare, resume_current, review_re
 from pma.workmap_state_read import read_trial_state
 from pma.workmap_state_sources import local_file
 from pma.workmap_state_store import StateStore
-from pma.workmap_store import StoreError
+from pma.workmap_store_types import StoreError
 
 
 def resolve_trial_source(root, ref):

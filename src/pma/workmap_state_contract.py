@@ -1,4 +1,4 @@
-"""History-free current/meaning contract (isolated; no legacy adapters)."""
+"""Validation for current Work Map state, reasons and results."""
 from copy import deepcopy
 from datetime import datetime, timezone
 import hashlib
@@ -89,11 +89,11 @@ def permission_authority_status(state, row):
 def validate_migration(migration, known):
     fields = {'legacy_revision', 'missing_versioned_sources', 'legacy_permissions', 'work_sources', 'review_notes'}
     require(isinstance(migration, dict) and set(migration) == fields
-            and nonempty(migration['legacy_revision']), 'invalid trial migration scope')
+            and nonempty(migration['legacy_revision']), 'invalid conversion record')
     missing = migration['missing_versioned_sources']
     require(refs(missing) and len(set(missing)) == len(missing) and all(map(is_version_ref, missing)),
             'invalid unresolved versioned sources')
-    require(refs(migration['legacy_permissions']), 'invalid legacy permission scope')
+    require(refs(migration['legacy_permissions']), 'invalid imported permission scope')
     sources = migration['work_sources']
     require(isinstance(sources, dict) and set(sources) <= known and all(
         isinstance(fields, dict) and set(fields) <= {'identity', 'intent', 'origin', 'parent'}
@@ -106,7 +106,7 @@ def validate_migration(migration, known):
 
 
 def validate(state):
-    """Reject technical-history fields rather than carrying empty legacy slots."""
+    """Validate the fields of one current Work Map snapshot."""
     fields = {'format_version','project_id','map_id','revision','recorded_at','works','display_ids',
               'aliases','map','retirements','thread_entries','evidence','movements','metadata'}
     require(isinstance(state, dict) and set(state) == fields and state['format_version'] == FORMAT, 'unsupported state contract/fields')

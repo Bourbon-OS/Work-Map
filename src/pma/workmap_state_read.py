@@ -1,4 +1,4 @@
-"""Read-only presentation of the isolated format, without consulting a legacy Map."""
+"""Read and present one selected Work Map snapshot."""
 import os
 from pathlib import Path
 

@@ -1,27 +1,7 @@
 """Small read hints and display comparisons; never a cache of canonical state."""
-from pma.workmap_sqlite_store import SQLiteStore
-from pma.workmap_store import StoreError
-from pma.workmap_thread_view import BINDING, selection_refs
-
-
-def selection_paths(snapshot, repo):
-    refs = next((refs for entry in reversed(snapshot['thread_entries'])
-                 if (refs := selection_refs(entry))), [])
-    folder = (repo / 'docs/work-management/evidence').resolve()
-    paths = []
-    for ref in refs:
-        if snapshot.get('format_version') == '0.4.3':
-            from pma.workmap_transfer import embedded_evidence
-            if embedded_evidence(snapshot, ref) is not None:
-                continue
-        match = BINDING.fullmatch(ref)
-        if match is None:
-            continue  # Normal meaning validation reports this invalid binding.
-        path = (folder / match[1]).resolve()
-        if path.parent != folder:
-            continue
-        paths.append(path)
-    return tuple(paths)
+from pma.workmap_desktop_extension import desktop_extension
+from pma.workmap_state_store import StateStore
+from pma.workmap_store_types import StoreError
 
 
 def file_marks(paths):
@@ -37,10 +17,8 @@ def file_marks(paths):
 
 def read_marker(source, paths=()):
     """Read one existing head value, without the snapshot BLOB or JSON parsing."""
-    store = SQLiteStore(source.path)
-    if source.state_trial:
-        from pma.workmap_state_store import StateStore
-        store = StateStore(source.path)
+    store_type = StateStore if source.state_trial else desktop_extension().SQLiteStore
+    store = store_type(source.path)
     with store.connection(read_only=True) as db:
         row = db.execute('SELECT token FROM current WHERE id=1').fetchone()
     token = row[0] if row else None

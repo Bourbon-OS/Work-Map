@@ -1,10 +1,10 @@
-"""Distinct physical format; reuses only SQLite transactions/CAS/bounded roots."""
+"""SQLite storage for current Work Map snapshots."""
 from dataclasses import dataclass
-from pma.workmap_sqlite_store import SQLiteStore
-from pma.workmap_store import CommittedVersion, CorruptStore, StoreConflict, _encode, _decode, _sha256
+from pma.workmap_sqlite_connection import SQLiteConnection
+from pma.workmap_store_types import CommittedVersion, CorruptStore, StoreConflict, _encode, _decode, _sha256
 from pma.workmap_state_contract import validate
 
-APPLICATION_ID = 0x574D5354  # WMST, never an old 0.4.x Store
+APPLICATION_ID = 0x574D5354  # WMST
 
 
 @dataclass(frozen=True)
@@ -38,17 +38,21 @@ class PreparedState:
         return CommittedVersion(self.token,candidate)
 
 
-class StateStore(SQLiteStore):
+class StateStore(SQLiteConnection):
     @staticmethod
     def _profile(db):
         if db.execute('PRAGMA application_id').fetchone()[0] != APPLICATION_ID or db.execute('PRAGMA user_version').fetchone()[0] != 1:
             raise CorruptStore('not a history-free Work Map Store')
-        return 'none'
 
     @staticmethod
-    def _retention(db):
-        StateStore._profile(db)
-        return 'current_and_previous'
+    def _trim_comparison_cache(db, current, previous):
+        db.execute('DELETE FROM snapshots WHERE token NOT IN (?,?)', (current, previous))
+
+    def _read_version(self, db):
+        row = db.execute(
+            'SELECT s.token, s.body FROM current c JOIN snapshots s ON s.token=c.token WHERE c.id=1'
+        ).fetchone()
+        return self.version(row)
 
     def initialize(self, snapshot):
         validate(snapshot)
@@ -68,7 +72,11 @@ class StateStore(SQLiteStore):
         return CommittedVersion(token,_decode(raw,'state'))
 
     def read(self, *, read_only=False):
-        result=super().read(read_only=read_only);validate(result.snapshot);return result
+        with self.connection(read_only=read_only) as db:
+            db.execute('BEGIN')
+            result = self._read_version(db)
+        validate(result.snapshot)
+        return result
 
     def commit_validated(self, expected_token, candidate, *, fault_at=None):
         return self.prepare_state(expected_token,candidate).commit(fault_at=fault_at)

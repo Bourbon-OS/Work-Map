@@ -4,10 +4,11 @@ from pathlib import Path
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox, simpledialog
 
-from pma.workmap_editor import FIELDS, KINDS, prepare_edit, save_edit, inspect_edit_result, source_ref
+from pma.workmap_desktop_sources import FIELDS, KINDS, source_ref
+from pma.workmap_desktop_edit import prepare_edit, save_edit, inspect_edit_result
 from pma.workmap_viewer_ui import PAPER, INK, MUTED, ACCENT, actor_label
-from pma.workmap_core import TransitionError
-from pma.workmap_store import StoreError
+from pma.workmap_change_error import TransitionError
+from pma.workmap_store_types import StoreError
 
 
 REASON_SUGGESTIONS = {

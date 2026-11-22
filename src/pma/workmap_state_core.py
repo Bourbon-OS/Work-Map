@@ -2,7 +2,7 @@
 from copy import deepcopy
 from dataclasses import dataclass, field
 from uuid import uuid4
-from pma.workmap_store import StoreConflict
+from pma.workmap_store_types import StoreConflict
 from pma.workmap_state_contract import (
     FORMAT, COLLECTIONS, StateInvalid, StateDenied, StateUnknown, StateConflict,
     validate, validate_work, refs, nonempty, digest, chain, subtree, address_prefix,
@@ -127,7 +127,7 @@ class StateCore:
         for rule in s['map']['action_rules']:
             if not set(rule['targets']) & set(path): continue
             if rule.get('legacy_scope') is not None:
-                raise StateUnknown('legacy Action Rule source or applicability unconfirmed')
+                raise StateUnknown('Action Rule source or applicability unconfirmed')
             if not set(rule['refs']) <= set(bound): raise StateUnknown('Action Rule source not bound')
             if rule.get('applies_to') and op not in rule['applies_to']: continue
             if rule.get('time_role')=='review_trigger' and op in recording: continue
@@ -358,7 +358,7 @@ class StateCore:
         elif op in ('release_scope','accept_scope'):
             from pma.workmap_state_transfer import change_scope
             return change_scope(self,s,q,r,bound)
-        else: raise StateDenied('unsupported new-contract operation; no legacy fallback')
+        else: raise StateDenied('unsupported Work Map operation')
 
     @staticmethod
     def _remove_completeness(s,keys):

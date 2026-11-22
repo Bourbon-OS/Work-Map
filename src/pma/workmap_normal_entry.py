@@ -5,6 +5,16 @@ import sqlite3
 from pma.workmap_state_contract import StateDenied
 from pma.workmap_state_read import read_trial_state
 from pma.workmap_state_store import APPLICATION_ID
+from pma.workmap_store_types import MissingStore
+
+
+def require_current_state(path):
+    if not path.is_file():
+        raise MissingStore('Mapの保存先を確認してください。新規作成のときだけ init を使います。')
+    snapshot = open_normal_state(path)
+    if snapshot is not None:
+        return snapshot
+    raise StateDenied('新形式のWork Mapを確認できません。保存先とバックアップを確認してください。')
 
 
 def is_state_store(path):
